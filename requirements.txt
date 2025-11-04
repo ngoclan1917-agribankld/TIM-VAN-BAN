@@ -3,6 +3,6 @@ pandas
 pillow
 pdfplumber
 python-docx
-pytesseract
 pdf2image
-textract
+pytesseract
+chardet
