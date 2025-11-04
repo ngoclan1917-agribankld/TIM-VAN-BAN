@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import StringIO
-from PyPDF2 import PdfReader
+from pypdf import PdfReader  # ✅ dùng thư viện mới, thay cho PyPDF2
 from docx import Document
 
 # ==========================
@@ -48,8 +48,11 @@ with col1:
         """Đọc nội dung từ file PDF, DOCX hoặc TXT"""
         text = ""
         if file.name.lower().endswith(".pdf"):
-            reader = PdfReader(file)
-            text = "\n".join([page.extract_text() or "" for page in reader.pages])
+            try:
+                reader = PdfReader(file)
+                text = "\n".join([page.extract_text() or "" for page in reader.pages])
+            except Exception:
+                st.error(f"❌ Không thể đọc nội dung PDF: {file.name}")
         elif file.name.lower().endswith(".docx"):
             doc = Document(file)
             text = "\n".join([p.text for p in doc.paragraphs])
@@ -58,7 +61,7 @@ with col1:
             text = stringio.read()
         else:
             raise ValueError("Định dạng file không hỗ trợ. Hãy tải PDF, DOCX hoặc TXT.")
-        return text
+        return text.strip()
 
     uploaded_files = st.file_uploader(
         "Chọn file văn bản (PDF, DOCX, TXT, có thể nhiều)",
@@ -72,7 +75,6 @@ with col1:
             if file.name not in st.session_state.uploaded_files:
                 try:
                     text_content = read_text_from_file(file)
-                    # Mỗi file lưu thành dataframe 1 cột
                     df = pd.DataFrame({"NỘI DUNG": [text_content], "SOURCE_FILE": [file.name]})
                     st.session_state.uploaded_files[file.name] = df
                 except Exception as e:
@@ -103,9 +105,9 @@ with col2:
             results = []
             for _, row in dataframe.iterrows():
                 text = row["NỘI DUNG"]
-                # Cắt đoạn quanh từ khóa để hiển thị ngắn gọn
-                if kw in text.lower():
-                    idx = text.lower().index(kw)
+                # Tìm tất cả vị trí xuất hiện của từ khóa
+                idx_list = [i for i in range(len(text)) if text.lower().find(kw, i) == i]
+                for idx in idx_list:
                     start = max(0, idx - 200)
                     end = min(len(text), idx + 200)
                     snippet = text[start:end].replace("\n", " ").strip()
@@ -119,7 +121,11 @@ with col2:
                     st.warning("❌ Không tìm thấy nội dung nào phù hợp.")
                 else:
                     for _, row in results.iterrows():
-                        st.markdown(f"**📜 Trích đoạn:** {row['TRICH_DOAN']}")
+                        # Tô đậm từ khóa cho dễ nhìn
+                        highlighted = row["TRICH_DOAN"].replace(
+                            user_input, f"**:orange[{user_input}]**"
+                        )
+                        st.markdown(f"**📜 Trích đoạn:** {highlighted}")
                         st.caption(f"📁 Nguồn: *{row['SOURCE_FILE']}*")
                         st.divider()
     else:
