@@ -1,8 +1,7 @@
 streamlit
 pandas
-pypdf
+pdf2image
+pytesseract
 python-docx
 docx2txt
-easyocr
-pdf2image
-pillow
+Pillow
