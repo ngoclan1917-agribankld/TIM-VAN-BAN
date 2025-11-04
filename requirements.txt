@@ -5,5 +5,4 @@ chardet
 pdfplumber
 pdf2image
 pytesseract
-Pillow
-nltk
+pillow

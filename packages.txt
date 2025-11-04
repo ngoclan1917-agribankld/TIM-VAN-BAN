@@ -1,4 +1,4 @@
 poppler-utils
 tesseract-ocr
-libreoffice
 tesseract-ocr-vie
+libreoffice
