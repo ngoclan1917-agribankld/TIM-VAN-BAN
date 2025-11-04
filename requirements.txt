@@ -3,5 +3,6 @@ pandas
 pypdf
 python-docx
 docx2txt
+easyocr
+pdf2image
 pillow
-pytesseract
