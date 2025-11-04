@@ -1,4 +1,9 @@
-poppler-utils
-tesseract-ocr
-tesseract-ocr-vie
-libreoffice
+streamlit
+python-docx
+pytesseract
+pdf2image
+PyPDF2
+pillow
+re
+io
+tempfile
