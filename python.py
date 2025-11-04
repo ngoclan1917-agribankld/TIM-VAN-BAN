@@ -13,14 +13,14 @@ import pytesseract
 from PIL import Image
 
 # ==========================
-# ⚙️ Cấu hình giao diện
+# ⚙️ CẤU HÌNH GIAO DIỆN
 # ==========================
-st.set_page_config(page_title="📜 Tra cứu Văn bản", page_icon="📚", layout="wide")
+st.set_page_config(page_title="📜 Tra cứu Văn bản Quy định", page_icon="📘", layout="wide")
 st.title("📜 ỨNG DỤNG TRA CỨU NỘI DUNG VĂN BẢN QUY ĐỊNH")
-st.markdown("📂 **Bên trái:** Tải file văn bản — 💬 **Bên phải:** Nhập từ khóa để tra cứu nhanh.")
+st.markdown("📂 **Bên trái:** Tải file văn bản — 💬 **Bên phải:** Nhập từ khóa để tìm kiếm nội dung liên quan.")
 
 # ==========================
-# 🧠 Session state
+# 🧠 SESSION STATE
 # ==========================
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = {}
@@ -28,23 +28,14 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
 # ==========================
-# 🎨 CSS tùy chỉnh
+# 🎨 CSS TÙY CHỈNH
 # ==========================
 st.markdown(
     """
     <style>
-    div[data-testid="column"]:first-child {
-        margin-right: 60px !important;
-    }
-    .highlight-red {
-        color: red;
-        font-weight: bold;
-    }
-    .text-block {
-        white-space: pre-wrap;
-        font-family: 'Times New Roman', serif;
-        line-height: 1.6;
-    }
+    div[data-testid="column"]:first-child { margin-right: 60px !important; }
+    .highlight-red { color: red; font-weight: bold; }
+    .text-block { white-space: pre-wrap; font-family: 'Times New Roman', serif; line-height: 1.6; }
     </style>
     """,
     unsafe_allow_html=True
@@ -54,7 +45,7 @@ st.markdown(
 # 📂 HÀM ĐỌC FILE
 # ==========================
 def read_text_from_file(file):
-    """Đọc nội dung từ file DOC, DOCX, TXT hoặc PDF (kể cả PDF scan)"""
+    """Đọc nội dung từ DOC/DOCX/TXT/PDF/ẢNH và giữ ngắt dòng"""
     text = ""
     ext = file.name.lower().split(".")[-1]
 
@@ -101,13 +92,13 @@ def read_text_from_file(file):
         else:
             st.warning(f"⚠️ Định dạng {ext} chưa được hỗ trợ.")
     except Exception as e:
-        st.error(f"❌ Lỗi khi đọc file {file.name}: {e}")
+        st.error(f"❌ Lỗi đọc file {file.name}: {e}")
 
     return text.strip()
 
 
 def extract_text_from_pdf(file_bytes):
-    """Kết hợp đọc PDF text + OCR cho PDF scan, giữ nguyên bố cục"""
+    """Đọc PDF (ưu tiên text, fallback OCR nếu scan)"""
     text = ""
     try:
         with pdfplumber.open(file_bytes) as pdf:
@@ -118,7 +109,6 @@ def extract_text_from_pdf(file_bytes):
     except Exception:
         pass
 
-    # Nếu không có text -> OCR
     if not text.strip():
         try:
             images = convert_from_bytes(file_bytes.getvalue())
@@ -129,7 +119,6 @@ def extract_text_from_pdf(file_bytes):
 
     return text.strip()
 
-
 # ==========================
 # 🧭 2 CỘT GIAO DIỆN
 # ==========================
@@ -139,10 +128,10 @@ col1, col2 = st.columns([1, 2])
 # 📁 CỘT TRÁI — TẢI FILE
 # ==========================
 with col1:
-    st.subheader("📂 Tải file (PDF, DOC, DOCX, TXT, Ảnh)")
+    st.subheader("📂 Tải file văn bản")
 
     uploaded_files = st.file_uploader(
-        "Chọn file văn bản",
+        "Chọn file (PDF, DOC, DOCX, TXT, Ảnh)",
         type=["pdf", "docx", "doc", "txt", "png", "jpg", "jpeg", "tiff"],
         accept_multiple_files=True,
         key=f"uploader_{st.session_state.uploader_key}"
@@ -155,7 +144,7 @@ with col1:
                 if text_content:
                     df = pd.DataFrame({"NỘI_DUNG": [text_content], "TÊN_FILE": [file.name]})
                     st.session_state.uploaded_files[file.name] = df
-                    st.success(f"✅ Đã xử lý: {file.name}")
+                    st.success(f"✅ Đã tải: {file.name}")
                 else:
                     st.warning(f"⚠️ Không thể trích xuất nội dung từ: {file.name}")
 
@@ -175,20 +164,27 @@ with col2:
         combined_df = pd.concat(st.session_state.uploaded_files.values(), ignore_index=True)
 
         user_input = st.text_input(
-            "🔎 Nhập từ khóa cần tìm (Enter hoặc nút Tìm kiếm):",
+            "🔎 Nhập từ khóa cần tìm (Enter hoặc nhấn nút):",
             key="search_input"
         )
         search_btn = st.button("🔍 Tìm kiếm")
 
         def tim_trong_van_ban(keyword, dataframe):
-            """Tìm kiếm chính xác trong nội dung, giữ nguyên định dạng"""
-            kw = keyword.strip()
+            """Tìm đoạn văn chứa từ khóa, giữ ngắt dòng"""
+            kw = keyword.strip().lower()
             results = []
             for _, row in dataframe.iterrows():
-                text = row["NỘI_DUNG"]
-                if kw.lower() in text.lower():
+                lines = row["NỘI_DUNG"].split("\n")
+                matched_blocks = []
+                for i, line in enumerate(lines):
+                    if kw in line.lower():
+                        start = max(0, i - 2)
+                        end = min(len(lines), i + 3)
+                        snippet = "\n".join(lines[start:end]).strip()
+                        matched_blocks.append(snippet)
+                for block in matched_blocks:
                     results.append({
-                        "KET_QUA": text,
+                        "TRICH_DOAN": block,
                         "TÊN_FILE": row["TÊN_FILE"]
                     })
             return pd.DataFrame(results)
@@ -201,31 +197,28 @@ with col2:
                     st.warning("❌ Không tìm thấy nội dung nào phù hợp.")
                 else:
                     for _, row in results.iterrows():
-                        original_text = row["KET_QUA"]
                         highlighted = re.sub(
                             fr"({re.escape(keyword)})",
                             r'<span class="highlight-red">\1</span>',
-                            original_text,
+                            row["TRICH_DOAN"],
                             flags=re.IGNORECASE
                         )
-                        st.markdown(
-                            f'<div class="text-block">{highlighted}</div>',
-                            unsafe_allow_html=True
-                        )
+                        st.markdown(f'<div class="text-block">{highlighted}</div>', unsafe_allow_html=True)
                         st.caption(f"📁 Nguồn: *{row['TÊN_FILE']}*")
                         st.divider()
             else:
-                st.info("⚠️ Vui lòng nhập từ khóa để tìm kiếm.")
+                st.info("⚠️ Nhập từ khóa để tìm kiếm.")
     else:
-        st.info("📌 Hãy tải ít nhất một file hợp lệ để bắt đầu tra cứu.")
+        st.info("📌 Hãy tải ít nhất một file văn bản để bắt đầu.")
 
 # ==========================
 # 📘 HƯỚNG DẪN
 # ==========================
 with st.expander("📘 Hướng dẫn sử dụng"):
     st.markdown("""
-    - Tải các file **PDF (kể cả scan)**, **DOC/DOCX**, **TXT** hoặc **ảnh (PNG/JPG)**.
-    - Nhập từ khóa và bấm **Enter** hoặc **nút Tìm kiếm** để tra cứu.
-    - Kết quả giữ **nguyên định dạng, ngắt dòng, bố cục gốc**.
-    - Cụm từ khóa được **bôi đỏ, đậm** trong nội dung.
+    - Tải file **PDF (có thể là scan)**, **DOC/DOCX**, **TXT** hoặc **ảnh (PNG/JPG)**.
+    - Nhập từ khóa → nhấn **Enter** hoặc nút **🔍 Tìm kiếm**.
+    - Ứng dụng chỉ hiển thị **đoạn văn có chứa từ khóa**, không phải toàn bộ file.
+    - Giữ **nguyên ngắt dòng và bố cục** của nội dung gốc.
+    - Cụm từ khóa được **bôi đỏ, đậm** để dễ nhận biết.
     """)
