@@ -1,15 +1,20 @@
 import streamlit as st
 import pandas as pd
 from io import StringIO
-from pypdf import PdfReader  # ✅ dùng thư viện mới, thay cho PyPDF2
+import pdfplumber
 from docx import Document
+from PIL import Image
+import pytesseract
+import textract
+import tempfile
+import os
 
 # ==========================
 # ⚙️ Cấu hình giao diện
 # ==========================
-st.set_page_config(page_title="Chatbot Văn bản Quy định", page_icon="📜", layout="wide")
-st.title("📜 Chatbot tra cứu Văn bản Quy định")
-st.markdown("📂 **Trái:** Vui lòng tải các file văn bản quy định — 💬 **Phải:** Tra cứu nội dung chứa từ khóa.")
+st.set_page_config(page_title="Chatbot Tra cứu Văn bản", page_icon="📜", layout="wide")
+st.title("📜 Chatbot tra cứu Văn bản Quy định (PDF / DOC / DOCX / Ảnh / TXT)")
+st.markdown("📂 **Trái:** Tải các file văn bản hoặc hình ảnh — 💬 **Phải:** Tra cứu nội dung chứa từ khóa.")
 
 # ==========================
 # 🧠 Session State
@@ -34,38 +39,73 @@ st.markdown(
 )
 
 # ==========================
-# 🧭 2 CỘT GIAO DIỆN
+# 🧭 GIAO DIỆN 2 CỘT
 # ==========================
 col1, col2 = st.columns([1, 2])
 
 # ==========================
-# 📂 CỘT TRÁI: TẢI FILE VĂN BẢN
+# 📂 CỘT TRÁI: TẢI FILE
 # ==========================
 with col1:
-    st.subheader("📂 Tải file văn bản")
+    st.subheader("📂 Tải file văn bản hoặc hình ảnh")
 
     def read_text_from_file(file):
-        """Đọc nội dung từ file PDF, DOCX hoặc TXT"""
+        """Đọc nội dung từ PDF (text hoặc scan), DOC, DOCX, TXT, hoặc hình ảnh"""
         text = ""
-        if file.name.lower().endswith(".pdf"):
-            try:
-                reader = PdfReader(file)
-                text = "\n".join([page.extract_text() or "" for page in reader.pages])
-            except Exception:
-                st.error(f"❌ Không thể đọc nội dung PDF: {file.name}")
-        elif file.name.lower().endswith(".docx"):
-            doc = Document(file)
-            text = "\n".join([p.text for p in doc.paragraphs])
-        elif file.name.lower().endswith(".txt"):
-            stringio = StringIO(file.getvalue().decode("utf-8", errors="ignore"))
-            text = stringio.read()
-        else:
-            raise ValueError("Định dạng file không hỗ trợ. Hãy tải PDF, DOCX hoặc TXT.")
+        fname = file.name.lower()
+
+        try:
+            # ===== PDF =====
+            if fname.endswith(".pdf"):
+                with pdfplumber.open(file) as pdf:
+                    text = "\n".join([page.extract_text() or "" for page in pdf.pages])
+                # Nếu không có text (PDF scan)
+                if not text.strip():
+                    st.warning(f"⚠️ {file.name} có thể là file scan — đang nhận dạng bằng OCR...")
+                    with pdfplumber.open(file) as pdf:
+                        for page in pdf.pages:
+                            img = page.to_image(resolution=300).original
+                            text += pytesseract.image_to_string(img, lang="vie+eng") + "\n"
+
+            # ===== DOCX =====
+            elif fname.endswith(".docx"):
+                doc = Document(file)
+                text = "\n".join([p.text for p in doc.paragraphs])
+
+            # ===== DOC =====
+            elif fname.endswith(".doc"):
+                # Lưu file tạm để textract đọc
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".doc") as tmp:
+                    tmp.write(file.read())
+                    tmp_path = tmp.name
+                try:
+                    text = textract.process(tmp_path).decode("utf-8", errors="ignore")
+                except Exception as e:
+                    st.error(f"Lỗi đọc file .doc ({file.name}): {e}")
+                finally:
+                    os.remove(tmp_path)
+
+            # ===== TXT =====
+            elif fname.endswith(".txt"):
+                stringio = StringIO(file.getvalue().decode("utf-8", errors="ignore"))
+                text = stringio.read()
+
+            # ===== ẢNH =====
+            elif fname.endswith((".jpg", ".jpeg", ".png")):
+                image = Image.open(file)
+                text = pytesseract.image_to_string(image, lang="vie+eng")
+
+            else:
+                raise ValueError("❌ Định dạng không hỗ trợ. Hãy tải PDF, DOC, DOCX, TXT, JPG hoặc PNG.")
+
+        except Exception as e:
+            st.error(f"❌ Lỗi đọc file {file.name}: {e}")
+
         return text.strip()
 
     uploaded_files = st.file_uploader(
-        "Chọn file văn bản (PDF, DOCX, TXT, có thể nhiều)",
-        type=["pdf", "docx", "txt"],
+        "Chọn file (PDF, DOC, DOCX, TXT, JPG, PNG — có thể nhiều)",
+        type=["pdf", "doc", "docx", "txt", "jpg", "jpeg", "png"],
         accept_multiple_files=True,
         key=f"uploader_{st.session_state.uploader_key}"
     )
@@ -73,12 +113,12 @@ with col1:
     if uploaded_files:
         for file in uploaded_files:
             if file.name not in st.session_state.uploaded_files:
-                try:
-                    text_content = read_text_from_file(file)
+                text_content = read_text_from_file(file)
+                if text_content:
                     df = pd.DataFrame({"NỘI DUNG": [text_content], "SOURCE_FILE": [file.name]})
                     st.session_state.uploaded_files[file.name] = df
-                except Exception as e:
-                    st.error(f"Lỗi đọc file {file.name}: {e}")
+                else:
+                    st.warning(f"⚠️ Không trích xuất được nội dung từ {file.name}")
 
     if st.session_state.uploaded_files:
         if st.button("🧹 Xóa tất cả file đã tải"):
@@ -87,17 +127,15 @@ with col1:
             st.rerun()
 
 # ==========================
-# 💬 CỘT PHẢI: CHATBOT TRA CỨU
+# 💬 CỘT PHẢI: TRA CỨU
 # ==========================
 with col2:
-    st.subheader("💬 Chatbot tra cứu nội dung văn bản")
+    st.subheader("💬 Chatbot tra cứu nội dung")
 
     if st.session_state.uploaded_files:
         combined_df = pd.concat(st.session_state.uploaded_files.values(), ignore_index=True)
 
-        user_input = st.text_input(
-            "🔎 Nhập từ khóa cần tìm (ví dụ: xử phạt hành chính, hợp đồng lao động...)"
-        )
+        user_input = st.text_input("🔎 Nhập từ khóa cần tìm (ví dụ: xử phạt hành chính, hợp đồng...)")
         search_btn = st.button("Tìm kiếm")
 
         def tim_trong_van_ban(keyword, dataframe):
@@ -105,37 +143,35 @@ with col2:
             results = []
             for _, row in dataframe.iterrows():
                 text = row["NỘI DUNG"]
-                # Tìm tất cả vị trí xuất hiện của từ khóa
-                idx_list = [i for i in range(len(text)) if text.lower().find(kw, i) == i]
-                for idx in idx_list:
+                idx = text.lower().find(kw)
+                while idx != -1:
                     start = max(0, idx - 200)
                     end = min(len(text), idx + 200)
                     snippet = text[start:end].replace("\n", " ").strip()
                     results.append({"TRICH_DOAN": snippet, "SOURCE_FILE": row["SOURCE_FILE"]})
+                    idx = text.lower().find(kw, idx + 1)
             return pd.DataFrame(results)
 
-        if user_input or search_btn:
-            if user_input:
-                results = tim_trong_van_ban(user_input, combined_df)
-                if results.empty:
-                    st.warning("❌ Không tìm thấy nội dung nào phù hợp.")
-                else:
-                    for _, row in results.iterrows():
-                        # Tô đậm từ khóa cho dễ nhìn
-                        highlighted = row["TRICH_DOAN"].replace(
-                            user_input, f"**:orange[{user_input}]**"
-                        )
-                        st.markdown(f"**📜 Trích đoạn:** {highlighted}")
-                        st.caption(f"📁 Nguồn: *{row['SOURCE_FILE']}*")
-                        st.divider()
+        if search_btn and user_input:
+            results = tim_trong_van_ban(user_input, combined_df)
+            if results.empty:
+                st.warning("❌ Không tìm thấy nội dung nào phù hợp.")
+            else:
+                for _, row in results.iterrows():
+                    highlighted = row["TRICH_DOAN"].replace(
+                        user_input, f"**:orange[{user_input}]**"
+                    )
+                    st.markdown(f"**📜 Trích đoạn:** {highlighted}")
+                    st.caption(f"📁 Nguồn: *{row['SOURCE_FILE']}*")
+                    st.divider()
     else:
-        st.info("📌 Vui lòng tải ít nhất một file văn bản trước khi tra cứu.")
+        st.info("📌 Vui lòng tải ít nhất một file trước khi tra cứu.")
 
 # ==========================
 # 📘 HƯỚNG DẪN
 # ==========================
 with st.expander("📘 Hướng dẫn sử dụng"):
-    st.write("- Có thể tải nhiều file văn bản định dạng **PDF, DOCX, hoặc TXT**.")
-    st.write("- Hệ thống sẽ đọc toàn bộ nội dung của từng file.")
-    st.write("- Khi nhập từ khóa, chương trình sẽ hiển thị đoạn văn có chứa từ khóa và nguồn file.")
-    st.write("- Ví dụ: nhập 'xử phạt' để tìm các điều khoản liên quan trong các văn bản tải lên.")
+    st.write("- Có thể tải nhiều file định dạng **PDF, DOC, DOCX, TXT, JPG, PNG**.")
+    st.write("- Hệ thống tự động OCR nếu file là ảnh hoặc PDF scan.")
+    st.write("- Nhập từ khóa để tìm đoạn văn liên quan trong các file đã tải lên.")
+    st.write("- Ví dụ: nhập 'xử phạt' để tìm điều khoản có chứa từ này.")
