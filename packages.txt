@@ -1,2 +1,4 @@
-tesseract-ocr
 poppler-utils
+tesseract-ocr
+tesseract-ocr-vie
+libreoffice
