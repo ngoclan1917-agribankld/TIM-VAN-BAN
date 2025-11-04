@@ -1,4 +1,7 @@
 streamlit
 pandas
-pypdf
+pdfplumber
 python-docx
+pytesseract
+Pillow
+textract
