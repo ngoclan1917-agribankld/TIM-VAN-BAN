@@ -1,6 +1,8 @@
 streamlit
+pandas
 python-docx
-pytesseract
+chardet
+pdfplumber
 pdf2image
-PyPDF2
+pytesseract
 pillow
