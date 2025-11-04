@@ -3,7 +3,6 @@ from io import BytesIO
 from docx import Document
 from PIL import Image
 import pytesseract
-import pdfplumber
 from pdf2image import convert_from_bytes
 
 # =========================
@@ -11,36 +10,39 @@ from pdf2image import convert_from_bytes
 # =========================
 st.set_page_config(page_title="🔍 Tìm kiếm nội dung file", layout="wide")
 st.title("🔍 Ứng dụng tìm kiếm nội dung trong file")
-
 st.markdown("""
 Ứng dụng hỗ trợ tìm kiếm từ khóa trong **PDF (text hoặc scan)**, **Word (.docx)** và **hình ảnh (.png, .jpg)**.
 """)
 
-
 # =========================
 # 📥 Upload file
 # =========================
-uploaded_file = st.file_uploader("Tải lên tệp (PDF, DOCX, hình ảnh)", type=["pdf", "docx", "png", "jpg", "jpeg", "tiff"])
+uploaded_file = st.file_uploader("📂 Tải lên tệp (PDF, DOCX, hình ảnh)", 
+                                 type=["pdf", "docx", "png", "jpg", "jpeg", "tiff"])
 query = st.text_input("🔎 Nhập từ khóa cần tìm:")
 
 # =========================
 # 📖 Hàm đọc file
 # =========================
 def read_docx(file):
-    doc = Document(file)
-    return "\n".join([p.text for p in doc.paragraphs])
+    try:
+        doc = Document(file)
+        return "\n".join(p.text for p in doc.paragraphs)
+    except Exception as e:
+        return f"Lỗi đọc DOCX: {e}"
 
-def read_pdf(file):
+def read_pdf(file_bytes):
     text = ""
     try:
-        with pdfplumber.open(file) as pdf:
+        import pdfplumber
+        with pdfplumber.open(file_bytes) as pdf:
             for page in pdf.pages:
                 text += page.extract_text() or ""
     except Exception:
-        # Nếu không đọc được bằng pdfplumber, thử OCR
-        images = convert_from_bytes(file.read())
-        for image in images:
-            text += pytesseract.image_to_string(image)
+        # OCR fallback
+        images = convert_from_bytes(file_bytes.getvalue(), dpi=150)
+        for img in images:
+            text += pytesseract.image_to_string(img)
     return text
 
 def read_image(file):
@@ -65,7 +67,6 @@ if uploaded_file and query:
             st.error("❌ Định dạng file không được hỗ trợ.")
             st.stop()
 
-        # Tìm kiếm từ khóa
         if query.lower() in text.lower():
             st.success(f"✅ Tìm thấy từ khóa **'{query}'** trong file **{uploaded_file.name}**")
             st.text_area("📄 Nội dung trích xuất:", text[:5000], height=300)
@@ -74,4 +75,3 @@ if uploaded_file and query:
 
     except Exception as e:
         st.error(f"❌ Lỗi đọc file {uploaded_file.name}: {str(e)}")
-
