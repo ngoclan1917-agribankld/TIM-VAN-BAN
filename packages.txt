@@ -1,9 +1,2 @@
-streamlit
-python-docx
-pytesseract
-pdf2image
-PyPDF2
-pillow
-re
-io
-tempfile
+tesseract-ocr
+poppler-utils
