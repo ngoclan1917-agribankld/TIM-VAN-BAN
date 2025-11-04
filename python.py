@@ -3,32 +3,30 @@ import docx
 import pytesseract
 from pdf2image import convert_from_bytes
 from PyPDF2 import PdfReader
+from PIL import Image
 import tempfile
 import re
 from io import BytesIO
 
 # ==========================
-# ⚙️ Cấu hình giao diện
+# ⚙️ CẤU HÌNH GIAO DIỆN
 # ==========================
-st.set_page_config(page_title="🔍 Tìm kiếm nội dung tài liệu", layout="wide")
-st.title("🔍 Tìm kiếm nội dung trong tài liệu")
-st.markdown("📂 **Bên trái:** Tải tài liệu — 💬 **Bên phải:** Nhập từ khóa cần tìm và xem kết quả")
+st.set_page_config(page_title="🔍 Tra cứu văn bản đa định dạng", layout="wide")
+st.title("🔍 ỨNG DỤNG TRA CỨU VĂN BẢN NHIỀU ĐỊNH DẠNG")
+st.markdown("📂 **Bên trái:** Tải file văn bản — 💬 **Bên phải:** Nhập từ khóa để tìm kiếm trong nội dung.")
 
 # ==========================
-# 🔧 Hàm trích xuất văn bản
+# 📦 HÀM ĐỌC FILE
 # ==========================
 def read_docx(file):
-    """Đọc file Word"""
     doc = docx.Document(file)
-    text = [para.text for para in doc.paragraphs]
-    return "\n".join(text)
+    return "\n".join(p.text for p in doc.paragraphs)
 
 def read_txt(file):
-    """Đọc file TXT"""
     return file.read().decode("utf-8", errors="ignore")
 
 def read_pdf(file):
-    """Đọc PDF, hỗ trợ OCR nếu là file scan"""
+    """Đọc PDF, nếu không có text thì OCR"""
     text = ""
     try:
         reader = PdfReader(file)
@@ -37,40 +35,47 @@ def read_pdf(file):
             if extracted:
                 text += extracted + "\n"
     except Exception:
-        pass  # fallback xuống OCR nếu đọc lỗi
+        pass
+
     if not text.strip():
-        # PDF scan (ảnh)
+        # OCR fallback
         file.seek(0)
         images = convert_from_bytes(file.read())
-        for image in images:
-            text += pytesseract.image_to_string(image, lang="vie+eng") + "\n"
+        for img in images:
+            text += pytesseract.image_to_string(img, lang="vie+eng") + "\n"
     return text
 
+def read_image(file):
+    """Đọc hình ảnh bằng OCR"""
+    img = Image.open(file)
+    return pytesseract.image_to_string(img, lang="vie+eng")
+
 def extract_text(uploaded_file):
-    """Xác định loại file và đọc nội dung"""
+    """Tự động nhận dạng định dạng file"""
     if not uploaded_file:
         return ""
-    filename = uploaded_file.name.lower()
-    if filename.endswith((".docx", ".doc")):
+    name = uploaded_file.name.lower()
+    if name.endswith((".docx", ".doc")):
         return read_docx(uploaded_file)
-    elif filename.endswith(".txt"):
+    elif name.endswith(".txt"):
         return read_txt(uploaded_file)
-    elif filename.endswith(".pdf"):
+    elif name.endswith(".pdf"):
         return read_pdf(uploaded_file)
+    elif name.endswith((".png", ".jpg", ".jpeg", ".tiff")):
+        return read_image(uploaded_file)
     else:
-        st.error("❌ Định dạng không được hỗ trợ. Hãy tải lên PDF, DOCX hoặc TXT.")
+        st.warning(f"⚠️ Định dạng không được hỗ trợ: {name}")
         return ""
 
 # ==========================
-# 🔍 Xử lý tìm kiếm và tô màu
+# 🔍 HÀM TÌM KIẾM
 # ==========================
 def highlight_keyword(text, keyword):
-    """Tô đỏ và đậm từ khóa"""
     pattern = re.compile(re.escape(keyword), re.IGNORECASE)
     return pattern.sub(lambda m: f"<span style='color:red;font-weight:bold'>{m.group(0)}</span>", text)
 
 def find_relevant_context(text, keyword):
-    """Tìm đoạn chứa từ khóa và lấy thêm ngữ cảnh đủ ý"""
+    """Tìm đoạn chứa từ khóa, mở rộng ngữ cảnh đầy đủ ý"""
     paragraphs = re.split(r'\n+', text.strip())
     results = []
     for para in paragraphs:
@@ -80,43 +85,74 @@ def find_relevant_context(text, keyword):
                 if re.search(keyword, s, re.IGNORECASE):
                     start = max(0, i - 1)
                     end = min(len(sentences), i + 2)
-                    context = " ".join(sentences[start:end])
-                    context = highlight_keyword(context, keyword)
-                    results.append(context)
+                    snippet = " ".join(sentences[start:end])
+                    snippet = highlight_keyword(snippet, keyword)
+                    results.append(snippet)
     return results
 
 # ==========================
-# 📂 Giao diện Streamlit
+# 🧭 GIAO DIỆN STREAMLIT
 # ==========================
 col1, col2 = st.columns([1, 2])
 
-# --- Bên trái: tải file ---
+# --- CỘT TRÁI: TẢI FILE ---
 with col1:
-    uploaded_file = st.file_uploader("📤 Tải tài liệu (PDF, DOCX, TXT)", type=["pdf", "docx", "doc", "txt"])
-    text_content = ""
-    if uploaded_file:
-        with st.spinner("⏳ Đang đọc nội dung tài liệu..."):
-            text_content = extract_text(uploaded_file)
-            st.success("✅ Đã tải và đọc xong tệp!")
+    st.subheader("📤 Tải nhiều file văn bản")
+    uploaded_files = st.file_uploader(
+        "Chọn nhiều tệp (PDF, DOC, DOCX, TXT, hình ảnh)",
+        type=["pdf", "docx", "doc", "txt", "png", "jpg", "jpeg", "tiff"],
+        accept_multiple_files=True
+    )
 
-# --- Bên phải: nhập từ khóa và tìm kiếm ---
-with col2:
-    keyword = st.text_input("🔎 Nhập từ khóa cần tìm", "", placeholder="Ví dụ: Agribank, báo cáo, kế hoạch...")
-
-    if st.button("Tìm kiếm") or (keyword and st.session_state.get("keyword") != keyword):
-        st.session_state["keyword"] = keyword
-        if not uploaded_file:
-            st.warning("⚠️ Hãy tải lên một tệp trước khi tìm kiếm.")
-        elif not keyword.strip():
-            st.warning("⚠️ Nhập từ khóa để tìm.")
-        else:
-            with st.spinner("🔍 Đang tìm kiếm..."):
-                results = find_relevant_context(text_content, keyword)
-                if results:
-                    st.markdown("### 📚 Kết quả tìm thấy:")
-                    for res in results:
-                        st.markdown(
-                            f"<div style='background:#f9f9f9;padding:10px;border-radius:8px;margin-bottom:10px;line-height:1.5'>{res}</div>",
-                            unsafe_allow_html=True)
+    file_texts = {}
+    if uploaded_files:
+        for f in uploaded_files:
+            with st.spinner(f"⏳ Đang xử lý {f.name}..."):
+                text = extract_text(f)
+                if text.strip():
+                    file_texts[f.name] = text
+                    st.success(f"✅ Đã đọc xong: {f.name}")
                 else:
-                    st.info("❌ Không tìm thấy nội dung chứa từ khóa.")
+                    st.warning(f"⚠️ Không trích xuất được nội dung: {f.name}")
+
+# --- CỘT PHẢI: TRA CỨU ---
+with col2:
+    st.subheader("💬 Tìm kiếm nội dung")
+
+    keyword = st.text_input("🔎 Nhập từ khóa cần tìm", placeholder="Nhập từ khóa rồi nhấn Enter hoặc nút tìm kiếm...")
+    search_btn = st.button("🔍 Tìm kiếm")
+
+    if (search_btn or keyword) and uploaded_files:
+        if not keyword.strip():
+            st.warning("⚠️ Hãy nhập từ khóa để tìm.")
+        else:
+            found_any = False
+            for fname, text in file_texts.items():
+                with st.spinner(f"🔍 Đang tìm trong {fname}..."):
+                    results = find_relevant_context(text, keyword)
+                    if results:
+                        found_any = True
+                        st.markdown(f"### 📘 Kết quả trong **{fname}**:")
+                        for r in results:
+                            st.markdown(
+                                f"<div style='background:#f9f9f9;padding:10px;border-radius:8px;margin-bottom:10px;line-height:1.6'>{r}</div>",
+                                unsafe_allow_html=True
+                            )
+                        st.divider()
+            if not found_any:
+                st.info("❌ Không tìm thấy nội dung chứa từ khóa trong các tệp đã tải.")
+    elif keyword and not uploaded_files:
+        st.warning("⚠️ Hãy tải lên ít nhất một tệp để tìm kiếm.")
+
+# ==========================
+# 📘 HƯỚNG DẪN
+# ==========================
+with st.expander("📘 Hướng dẫn sử dụng"):
+    st.markdown("""
+    - Tải **nhiều file cùng lúc**: PDF, DOC, DOCX, TXT hoặc ảnh (PNG/JPG).
+    - Hỗ trợ **PDF scan**, tự động OCR.
+    - Nhập **từ khóa**, bấm **Enter hoặc nút 🔍 Tìm kiếm**.
+    - Ứng dụng hiển thị **đoạn chứa từ khóa**, có thể mở rộng vài câu trước/sau để đủ ý.
+    - **Từ khóa được tô đỏ và in đậm** để dễ nhận biết.
+    - Giữ nguyên **ngắt dòng, bố cục nội dung gốc**.
+    """)
