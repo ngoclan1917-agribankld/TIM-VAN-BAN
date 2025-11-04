@@ -1,128 +1,185 @@
 import streamlit as st
 import pandas as pd
-from PIL import Image
-from pdf2image import convert_from_bytes
-import pdfplumber
+from io import BytesIO, StringIO
 from docx import Document
-import pytesseract
 import chardet
-from io import BytesIO
 import tempfile
+import re
+import os
+import subprocess
 
-# =================================
+# ==========================
 # ⚙️ Cấu hình giao diện
-# =================================
-st.set_page_config(page_title="🔎 Tra cứu văn bản", layout="wide")
-st.title("🔎 Tra cứu nội dung tài liệu (PDF, DOCX, TXT, Ảnh)")
-st.markdown("Ứng dụng hỗ trợ cả **PDF scan**, **ảnh chụp**, và **file Word, text**.")
+# ==========================
+st.set_page_config(page_title="📜 Tra cứu Văn bản", page_icon="📚", layout="wide")
+st.title("📜 ỨNG DỤNG TRA CỨU NỘI DUNG VĂN BẢN QUY ĐỊNH")
+st.markdown("📂 **Bên trái:** Tải file văn bản — 💬 **Bên phải:** Nhập từ khóa để tra cứu nhanh.")
 
-# =================================
-# 🧭 Bố cục 2 cột
-# =================================
+# ==========================
+# 🧠 Khởi tạo session
+# ==========================
+if "uploaded_files" not in st.session_state:
+    st.session_state.uploaded_files = {}
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+# ==========================
+# 📏 Căn chỉnh lề
+# ==========================
+st.markdown(
+    """
+    <style>
+    div[data-testid="column"]:first-child {
+        margin-right: 60px !important;
+    }
+    .highlight-red {
+        color: red;
+        font-weight: bold;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+# ==========================
+# 🧭 2 CỘT GIAO DIỆN
+# ==========================
 col1, col2 = st.columns([1, 2])
 
-# =================================
-# 📂 CỘT TRÁI — TẢI FILE
-# =================================
+# ==========================
+# 📂 CỘT TRÁI: TẢI FILE
+# ==========================
 with col1:
-    st.subheader("📁 Tải tệp")
-    files = st.file_uploader(
-        "Chọn tệp (PDF, DOCX, TXT, PNG, JPG, JPEG, TIFF)",
-        type=["pdf", "docx", "txt", "png", "jpg", "jpeg", "tiff"],
-        accept_multiple_files=True,
-    )
+    st.subheader("📂 Tải file văn bản (DOC, DOCX, TXT)")
 
-    if "data_store" not in st.session_state:
-        st.session_state.data_store = {}
-
-    def extract_text_from_pdf(file_bytes):
-        """Đọc PDF — kết hợp pdfplumber + OCR fallback"""
+    def read_text_from_file(file):
+        """Đọc nội dung từ file DOC, DOCX hoặc TXT"""
         text = ""
-        with pdfplumber.open(file_bytes) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-
-        if not text.strip():
-            # Nếu không có text thì OCR
-            images = convert_from_bytes(file_bytes.getvalue())
-            for img in images:
-                text += pytesseract.image_to_string(img, lang="vie")
-
+        ext = file.name.lower().split(".")[-1]
+        try:
+            if ext == "docx":
+                doc = Document(file)
+                text = "\n".join([p.text for p in doc.paragraphs])
+            elif ext == "doc":
+                # Chuyển file .doc sang .docx tạm thời (cần libreoffice)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".doc") as tmp_doc:
+                    tmp_doc.write(file.read())
+                    tmp_doc_path = tmp_doc.name
+                tmp_docx_path = tmp_doc_path + "x"
+                try:
+                    subprocess.run(
+                        ["soffice", "--headless", "--convert-to", "docx", "--outdir", os.path.dirname(tmp_docx_path), tmp_doc_path],
+                        check=True,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE
+                    )
+                    doc = Document(tmp_docx_path)
+                    text = "\n".join([p.text for p in doc.paragraphs])
+                except Exception as e:
+                    st.error("❌ Không thể đọc file DOC. Cần cài LibreOffice (soffice).")
+                finally:
+                    if os.path.exists(tmp_doc_path):
+                        os.remove(tmp_doc_path)
+                    if os.path.exists(tmp_docx_path):
+                        os.remove(tmp_docx_path)
+            elif ext == "txt":
+                raw = file.read()
+                enc = chardet.detect(raw)["encoding"] or "utf-8"
+                stringio = StringIO(raw.decode(enc, errors="ignore"))
+                text = stringio.read()
+            else:
+                st.warning("⚠️ Chỉ hỗ trợ DOC, DOCX hoặc TXT.")
+        except Exception as e:
+            st.error(f"❌ Lỗi đọc file {file.name}: {e}")
         return text.strip()
 
-    def extract_text_from_file(uploaded_file):
-        ext = uploaded_file.name.lower().split(".")[-1]
-        text = ""
-        try:
-            if ext == "pdf":
-                bytes_data = BytesIO(uploaded_file.read())
-                text = extract_text_from_pdf(bytes_data)
+    uploaded_files = st.file_uploader(
+        "Chọn file văn bản",
+        type=["docx", "doc", "txt"],
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key}"
+    )
 
-            elif ext == "docx":
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
-                    tmp.write(uploaded_file.read())
-                    tmp_path = tmp.name
-                doc = Document(tmp_path)
-                text = "\n".join(p.text for p in doc.paragraphs)
-
-            elif ext == "txt":
-                raw = uploaded_file.read()
-                enc = chardet.detect(raw)["encoding"] or "utf-8"
-                text = raw.decode(enc, errors="ignore")
-
-            elif ext in ["png", "jpg", "jpeg", "tiff"]:
-                img = Image.open(uploaded_file)
-                text = pytesseract.image_to_string(img, lang="vie")
-
-        except Exception as e:
-            st.error(f"❌ Lỗi khi đọc {uploaded_file.name}: {e}")
-        return text
-
-    if files:
-        for f in files:
-            if f.name not in st.session_state.data_store:
-                content = extract_text_from_file(f)
-                if content:
-                    st.session_state.data_store[f.name] = content
-                    st.success(f"✅ Đã xử lý: {f.name}")
+    if uploaded_files:
+        for file in uploaded_files:
+            if file.name not in st.session_state.uploaded_files:
+                text_content = read_text_from_file(file)
+                if text_content:
+                    df = pd.DataFrame({"NỘI_DUNG": [text_content], "TÊN_FILE": [file.name]})
+                    st.session_state.uploaded_files[file.name] = df
+                    st.success(f"✅ Đã tải: {file.name}")
                 else:
-                    st.warning(f"⚠️ Không đọc được nội dung từ {f.name}")
+                    st.warning(f"⚠️ Không đọc được nội dung: {file.name}")
 
-    if st.session_state.data_store:
-        if st.button("🧹 Xóa tất cả file"):
-            st.session_state.data_store.clear()
+    if st.session_state.uploaded_files:
+        if st.button("🧹 Xóa tất cả file đã tải"):
+            st.session_state.uploaded_files.clear()
+            st.session_state.uploader_key += 1
             st.rerun()
 
-# =================================
-# 🔍 CỘT PHẢI — TÌM KIẾM
-# =================================
+# ==========================
+# 💬 CỘT PHẢI: TRA CỨU
+# ==========================
 with col2:
-    st.subheader("🔍 Tìm kiếm nội dung")
-    keyword = st.text_input("Nhập từ khóa:")
-    if st.button("Tìm"):
-        results = []
-        for fname, text in st.session_state.data_store.items():
-            if keyword.lower() in text.lower():
-                idx = text.lower().find(keyword.lower())
-                snippet = text[max(0, idx-100): idx+200].replace("\n", " ")
-                results.append((fname, snippet))
+    st.subheader("💬 Tra cứu nội dung")
 
-        if results:
-            st.success(f"Tìm thấy {len(results)} kết quả:")
-            for fname, snippet in results:
-                st.markdown(f"**📄 {fname}:** ...{snippet.replace(keyword, f'**🟠{keyword}**')}...")
-                st.divider()
-        else:
-            st.warning("Không tìm thấy từ khóa trong tài liệu.")
+    if st.session_state.uploaded_files:
+        combined_df = pd.concat(st.session_state.uploaded_files.values(), ignore_index=True)
 
-# =================================
+        user_input = st.text_input(
+            "🔎 Nhập từ khóa cần tìm (bấm Enter hoặc nút Tìm kiếm):",
+            key="search_input"
+        )
+
+        search_btn = st.button("🔍 Tìm kiếm")
+
+        def tim_trong_van_ban(keyword, dataframe):
+            kw = keyword.strip().lower()
+            results = []
+            for _, row in dataframe.iterrows():
+                text = row["NỘI_DUNG"]
+                matches = [m.start() for m in re.finditer(re.escape(kw), text.lower())]
+                for idx in matches:
+                    start = max(0, idx - 150)
+                    end = min(len(text), idx + 200)
+                    snippet = text[start:end].replace("\n", " ").strip()
+                    results.append({
+                        "TRICH_DOAN": snippet,
+                        "TÊN_FILE": row["TÊN_FILE"]
+                    })
+            return pd.DataFrame(results)
+
+        if (user_input and st.session_state.search_input) or search_btn:
+            keyword = user_input.strip()
+            if keyword:
+                results = tim_trong_van_ban(keyword, combined_df)
+                if results.empty:
+                    st.warning("❌ Không tìm thấy nội dung nào phù hợp.")
+                else:
+                    for _, row in results.iterrows():
+                        snippet = row["TRICH_DOAN"]
+                        # Bôi đậm và tô đỏ cụm từ khóa
+                        highlighted = re.sub(
+                            fr"({re.escape(keyword)})",
+                            r'<span class="highlight-red">\1</span>',
+                            snippet,
+                            flags=re.IGNORECASE
+                        )
+                        st.markdown(f"**📜 Trích đoạn:**<br>{highlighted}", unsafe_allow_html=True)
+                        st.caption(f"📁 Nguồn: *{row['TÊN_FILE']}*")
+                        st.divider()
+            else:
+                st.info("⚠️ Vui lòng nhập từ khóa để tìm kiếm.")
+    else:
+        st.info("📌 Hãy tải ít nhất một file DOC, DOCX hoặc TXT để bắt đầu tra cứu.")
+
+# ==========================
 # 📘 HƯỚNG DẪN
-# =================================
-with st.expander("📘 Hướng dẫn"):
+# ==========================
+with st.expander("📘 Hướng dẫn sử dụng"):
     st.markdown("""
-    - Tải các file PDF (gốc hoặc scan), DOCX, TXT hoặc ảnh.
-    - Ứng dụng tự nhận dạng text và OCR khi cần.
-    - Hỗ trợ tiếng Việt (cần có gói `tesseract-ocr-vie` trong `packages.txt`).
+    - Có thể tải nhiều file **DOC, DOCX hoặc TXT** cùng lúc.
+    - Ứng dụng tự động đọc toàn bộ nội dung các file.
+    - Nhập từ khóa và bấm **Enter** hoặc **nút Tìm kiếm** để tra cứu.
+    - Từ khóa trong kết quả sẽ được **bôi đậm màu đỏ** để dễ nhận diện.
     """)
