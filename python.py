@@ -40,6 +40,11 @@ st.markdown(
         color: red;
         font-weight: bold;
     }
+    .text-block {
+        white-space: pre-wrap;
+        font-family: 'Times New Roman', serif;
+        line-height: 1.6;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -102,14 +107,14 @@ def read_text_from_file(file):
 
 
 def extract_text_from_pdf(file_bytes):
-    """Kết hợp đọc PDF text + OCR cho PDF scan"""
+    """Kết hợp đọc PDF text + OCR cho PDF scan, giữ nguyên bố cục"""
     text = ""
     try:
         with pdfplumber.open(file_bytes) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text()
+                page_text = page.extract_text(x_tolerance=1, y_tolerance=1)
                 if page_text:
-                    text += page_text + "\n"
+                    text += page_text + "\n\n"
     except Exception:
         pass
 
@@ -118,7 +123,7 @@ def extract_text_from_pdf(file_bytes):
         try:
             images = convert_from_bytes(file_bytes.getvalue())
             for img in images:
-                text += pytesseract.image_to_string(img, lang="vie") + "\n"
+                text += pytesseract.image_to_string(img, lang="vie") + "\n\n"
         except Exception as e:
             st.error(f"❌ Lỗi OCR PDF: {e}")
 
@@ -176,17 +181,14 @@ with col2:
         search_btn = st.button("🔍 Tìm kiếm")
 
         def tim_trong_van_ban(keyword, dataframe):
-            kw = keyword.strip().lower()
+            """Tìm kiếm chính xác trong nội dung, giữ nguyên định dạng"""
+            kw = keyword.strip()
             results = []
             for _, row in dataframe.iterrows():
                 text = row["NỘI_DUNG"]
-                matches = [m.start() for m in re.finditer(re.escape(kw), text.lower())]
-                for idx in matches:
-                    start = max(0, idx - 150)
-                    end = min(len(text), idx + 200)
-                    snippet = text[start:end].replace("\n", " ").strip()
+                if kw.lower() in text.lower():
                     results.append({
-                        "TRICH_DOAN": snippet,
+                        "KET_QUA": text,
                         "TÊN_FILE": row["TÊN_FILE"]
                     })
             return pd.DataFrame(results)
@@ -199,14 +201,17 @@ with col2:
                     st.warning("❌ Không tìm thấy nội dung nào phù hợp.")
                 else:
                     for _, row in results.iterrows():
-                        snippet = row["TRICH_DOAN"]
+                        original_text = row["KET_QUA"]
                         highlighted = re.sub(
                             fr"({re.escape(keyword)})",
                             r'<span class="highlight-red">\1</span>',
-                            snippet,
+                            original_text,
                             flags=re.IGNORECASE
                         )
-                        st.markdown(f"**📜 Trích đoạn:**<br>{highlighted}", unsafe_allow_html=True)
+                        st.markdown(
+                            f'<div class="text-block">{highlighted}</div>',
+                            unsafe_allow_html=True
+                        )
                         st.caption(f"📁 Nguồn: *{row['TÊN_FILE']}*")
                         st.divider()
             else:
@@ -221,6 +226,6 @@ with st.expander("📘 Hướng dẫn sử dụng"):
     st.markdown("""
     - Tải các file **PDF (kể cả scan)**, **DOC/DOCX**, **TXT** hoặc **ảnh (PNG/JPG)**.
     - Nhập từ khóa và bấm **Enter** hoặc **nút Tìm kiếm** để tra cứu.
-    - Từ khóa trong kết quả sẽ được **bôi đậm màu đỏ**.
-    - PDF scan sẽ được tự động nhận dạng bằng **OCR tiếng Việt**.
+    - Kết quả giữ **nguyên định dạng, ngắt dòng, bố cục gốc**.
+    - Cụm từ khóa được **bôi đỏ, đậm** trong nội dung.
     """)
