@@ -1,12 +1,15 @@
 import streamlit as st
 import pandas as pd
+from io import StringIO
+from PyPDF2 import PdfReader
+from docx import Document
 
 # ==========================
 # ⚙️ Cấu hình giao diện
 # ==========================
-st.set_page_config(page_title="Chatbot Trắc Nghiệm", page_icon="🤖", layout="wide")
-st.title("🤖 Chatbot Trắc nghiệm")
-st.markdown("📂 **Trái:** Vui lòng Tải các file câu hỏi theo nghiệp vụ — 💬 **Phải:** Tra cứu đáp án đúng.")
+st.set_page_config(page_title="Chatbot Văn bản Quy định", page_icon="📜", layout="wide")
+st.title("📜 Chatbot tra cứu Văn bản Quy định")
+st.markdown("📂 **Trái:** Vui lòng tải các file văn bản quy định — 💬 **Phải:** Tra cứu nội dung chứa từ khóa.")
 
 # ==========================
 # 🧠 Session State
@@ -14,10 +17,10 @@ st.markdown("📂 **Trái:** Vui lòng Tải các file câu hỏi theo nghiệp 
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = {}
 if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0  # để reset file_uploader khi xóa
+    st.session_state.uploader_key = 0
 
 # ==========================
-# 📏 Tăng khoảng cách giữa 2 vùng
+# 📏 Căn lề
 # ==========================
 st.markdown(
     """
@@ -36,27 +39,30 @@ st.markdown(
 col1, col2 = st.columns([1, 2])
 
 # ==========================
-# 📂 CỘT TRÁI: TẢI FILE
+# 📂 CỘT TRÁI: TẢI FILE VĂN BẢN
 # ==========================
 with col1:
-    st.subheader("📂 Tải file Excel")
+    st.subheader("📂 Tải file văn bản")
 
-    def read_file_from_header(file):
-        """Tìm dòng chứa 'CÂU HỎI' và đọc dữ liệu từ đó trở xuống"""
-        df_raw = pd.read_excel(file, header=None)
-        header_row_idx = None
-        for i, row in df_raw.iterrows():
-            if any(str(cell).strip().upper() == "CÂU HỎI" for cell in row):
-                header_row_idx = i
-                break
-        if header_row_idx is None:
-            raise ValueError("❌ Không tìm thấy dòng tiêu đề có cột 'CÂU HỎI'.")
-        df = pd.read_excel(file, header=header_row_idx)
-        return df
+    def read_text_from_file(file):
+        """Đọc nội dung từ file PDF, DOCX hoặc TXT"""
+        text = ""
+        if file.name.lower().endswith(".pdf"):
+            reader = PdfReader(file)
+            text = "\n".join([page.extract_text() or "" for page in reader.pages])
+        elif file.name.lower().endswith(".docx"):
+            doc = Document(file)
+            text = "\n".join([p.text for p in doc.paragraphs])
+        elif file.name.lower().endswith(".txt"):
+            stringio = StringIO(file.getvalue().decode("utf-8", errors="ignore"))
+            text = stringio.read()
+        else:
+            raise ValueError("Định dạng file không hỗ trợ. Hãy tải PDF, DOCX hoặc TXT.")
+        return text
 
     uploaded_files = st.file_uploader(
-        "Chọn file Excel (có thể nhiều)",
-        type=["xlsx", "xls"],
+        "Chọn file văn bản (PDF, DOCX, TXT, có thể nhiều)",
+        type=["pdf", "docx", "txt"],
         accept_multiple_files=True,
         key=f"uploader_{st.session_state.uploader_key}"
     )
@@ -65,7 +71,9 @@ with col1:
         for file in uploaded_files:
             if file.name not in st.session_state.uploaded_files:
                 try:
-                    df = read_file_from_header(file)
+                    text_content = read_text_from_file(file)
+                    # Mỗi file lưu thành dataframe 1 cột
+                    df = pd.DataFrame({"NỘI DUNG": [text_content], "SOURCE_FILE": [file.name]})
                     st.session_state.uploaded_files[file.name] = df
                 except Exception as e:
                     st.error(f"Lỗi đọc file {file.name}: {e}")
@@ -73,53 +81,55 @@ with col1:
     if st.session_state.uploaded_files:
         if st.button("🧹 Xóa tất cả file đã tải"):
             st.session_state.uploaded_files.clear()
-            st.session_state.uploader_key += 1  # reset file_uploader
+            st.session_state.uploader_key += 1
             st.rerun()
 
 # ==========================
-# 💬 CỘT PHẢI: CHATBOT
+# 💬 CỘT PHẢI: CHATBOT TRA CỨU
 # ==========================
 with col2:
-    st.subheader("💬 Chatbot tra cứu đáp án")
+    st.subheader("💬 Chatbot tra cứu nội dung văn bản")
 
     if st.session_state.uploaded_files:
-        # Gộp dữ liệu từ tất cả file đã tải
         combined_df = pd.concat(st.session_state.uploaded_files.values(), ignore_index=True)
-        combined_df.columns = [str(c).strip().upper() for c in combined_df.columns]
 
         user_input = st.text_input(
-            "🔎 Nhập từ khóa câu hỏi và nhấn Enter hoặc bấm 'Tìm kiếm'"
+            "🔎 Nhập từ khóa cần tìm (ví dụ: xử phạt hành chính, hợp đồng lao động...)"
         )
         search_btn = st.button("Tìm kiếm")
 
-        def tim_cau_hoi(keyword, dataframe):
+        def tim_trong_van_ban(keyword, dataframe):
             kw = keyword.lower().strip()
-            return dataframe[dataframe['CÂU HỎI'].str.lower().str.contains(kw, na=False)]
+            results = []
+            for _, row in dataframe.iterrows():
+                text = row["NỘI DUNG"]
+                # Cắt đoạn quanh từ khóa để hiển thị ngắn gọn
+                if kw in text.lower():
+                    idx = text.lower().index(kw)
+                    start = max(0, idx - 200)
+                    end = min(len(text), idx + 200)
+                    snippet = text[start:end].replace("\n", " ").strip()
+                    results.append({"TRICH_DOAN": snippet, "SOURCE_FILE": row["SOURCE_FILE"]})
+            return pd.DataFrame(results)
 
         if user_input or search_btn:
             if user_input:
-                results = tim_cau_hoi(user_input, combined_df)
+                results = tim_trong_van_ban(user_input, combined_df)
                 if results.empty:
-                    st.warning("❌ Không tìm thấy câu hỏi nào phù hợp.")
+                    st.warning("❌ Không tìm thấy nội dung nào phù hợp.")
                 else:
                     for _, row in results.iterrows():
-                        try:
-                            dap_an_dung = int(row['ĐÁP ÁN ĐÚNG'])
-                            noi_dung_dap_an = row[f'ĐÁP ÁN {dap_an_dung}']
-                            st.markdown(f"**📌 Câu hỏi:** {row['CÂU HỎI']}")
-                            st.success(f"✅ **Đáp án đúng:** {noi_dung_dap_an}")
-                            st.divider()
-                        except Exception:
-                            st.error("⚠️ File không đúng định dạng cột đáp án.")
+                        st.markdown(f"**📜 Trích đoạn:** {row['TRICH_DOAN']}")
+                        st.caption(f"📁 Nguồn: *{row['SOURCE_FILE']}*")
+                        st.divider()
     else:
-        st.info("📌 Vui lòng tải ít nhất một file trước khi tra cứu.")
+        st.info("📌 Vui lòng tải ít nhất một file văn bản trước khi tra cứu.")
 
 # ==========================
 # 📘 HƯỚNG DẪN
 # ==========================
 with st.expander("📘 Hướng dẫn sử dụng"):
-    st.write("- Có thể tải nhiều file Excel cùng lúc.")
-    st.write("- Tự động phát hiện dòng tiêu đề có cột 'CÂU HỎI'.")
-    st.write("- Sau khi tải, có thể xóa tất cả file bằng nút 🧹.")
-    st.write("- Nhập từ khóa câu hỏi và nhấn Enter hoặc nút 'Tìm kiếm'.")
-    st.write("- Cột bắt buộc: STT | CÂU HỎI | ĐÁP ÁN 1–4 | ĐÁP ÁN ĐÚNG.")
+    st.write("- Có thể tải nhiều file văn bản định dạng **PDF, DOCX, hoặc TXT**.")
+    st.write("- Hệ thống sẽ đọc toàn bộ nội dung của từng file.")
+    st.write("- Khi nhập từ khóa, chương trình sẽ hiển thị đoạn văn có chứa từ khóa và nguồn file.")
+    st.write("- Ví dụ: nhập 'xử phạt' để tìm các điều khoản liên quan trong các văn bản tải lên.")
