@@ -4,171 +4,167 @@ from io import StringIO
 from tempfile import NamedTemporaryFile
 import os
 
-# ưu tiên import PyPDF2 or pypdf
-try:
-    # new package name is pypdf, older is PyPDF2; try both
-    from pypdf import PdfReader  # try pypdf first
-except Exception:
+from pypdf import PdfReader
+from docx import Document
+import docx2txt
+from PIL import Image
+import easyocr
+
+# ==========================
+# ⚙️ Cấu hình giao diện
+# ==========================
+st.set_page_config(page_title="Chatbot Tra cứu Văn bản OCR", page_icon="📜", layout="wide")
+st.title("📜 Chatbot tra cứu Văn bản Quy định (có OCR)")
+st.caption("💡 Hỗ trợ PDF (văn bản + scan ảnh), DOCX, DOC, TXT")
+
+# ==========================
+# 🧠 Bộ nhớ session
+# ==========================
+if "uploaded_files" not in st.session_state:
+    st.session_state.uploaded_files = {}
+
+# ==========================
+# 🔤 OCR - EasyOCR
+# ==========================
+@st.cache_resource
+def get_ocr_reader():
+    return easyocr.Reader(["vi", "en"], gpu=False)
+
+ocr_reader = get_ocr_reader()
+
+# ==========================
+# 📖 Hàm đọc nội dung file
+# ==========================
+def extract_text(file):
+    """Đọc nội dung từ PDF (văn bản hoặc scan), DOCX, DOC, TXT"""
+    name = file.name.lower()
+    text = ""
+
     try:
-        from PyPDF2 import PdfReader
+        if name.endswith(".pdf"):
+            text = extract_text_from_pdf(file)
+
+        elif name.endswith(".docx"):
+            doc = Document(file)
+            text = "\n".join(p.text for p in doc.paragraphs)
+
+        elif name.endswith(".doc"):
+            with NamedTemporaryFile(delete=False, suffix=".doc") as tmp:
+                tmp.write(file.getvalue())
+                tmp.flush()
+                text = docx2txt.process(tmp.name) or ""
+                os.remove(tmp.name)
+
+        elif name.endswith(".txt"):
+            text = file.getvalue().decode("utf-8", errors="ignore")
+
+        else:
+            st.warning(f"⚠️ Định dạng không hỗ trợ: {file.name}")
+
+    except Exception as e:
+        st.error(f"❌ Lỗi đọc file {file.name}: {e}")
+
+    return text.strip()
+
+
+def extract_text_from_pdf(file):
+    """Thử đọc PDF text, nếu không có thì dùng OCR"""
+    try:
+        reader = PdfReader(file)
+        pages_text = []
+        ocr_used = False
+        for i, page in enumerate(reader.pages):
+            txt = page.extract_text()
+            if txt and txt.strip():
+                pages_text.append(txt)
+            else:
+                # OCR fallback
+                ocr_used = True
+                img = page_to_image(file, i)
+                if img:
+                    ocr_text = ocr_reader.readtext(img, detail=0, paragraph=True)
+                    pages_text.append("\n".join(ocr_text))
+        if ocr_used:
+            st.info("📸 Một số trang PDF được đọc bằng OCR (ảnh scan).")
+        return "\n".join(pages_text)
+
+    except Exception as e:
+        st.error(f"❌ Lỗi đọc PDF: {e}")
+        return ""
+
+
+def page_to_image(file, page_num):
+    """Chuyển trang PDF sang ảnh để OCR"""
+    try:
+        from pdf2image import convert_from_bytes
+        images = convert_from_bytes(file.getvalue(), first_page=page_num + 1, last_page=page_num + 1)
+        return images[0]
     except Exception:
-        PdfReader = None
+        return None
 
-# docx reader
-try:
-    from docx import Document
-except Exception:
-    Document = None
 
-# doc (old .doc) fallback using docx2txt if available
-try:
-    import docx2txt
-except Exception:
-    docx2txt = None
-
-st.set_page_config(page_title="Chatbot Tra cứu Văn bản", page_icon="📜", layout="wide")
-st.title("📜 Chatbot tra cứu Văn bản (PDF / DOCX / DOC / TXT)")
-st.caption("Lưu ý: phiên bản này không sử dụng OCR — nếu file là ảnh/scan, app sẽ không trích được text")
-
-# session state to keep uploaded content (as text)
-if "files_text" not in st.session_state:
-    st.session_state.files_text = {}  # {filename: text}
-
+# ==========================
+# 🧭 Giao diện
+# ==========================
 col1, col2 = st.columns([1, 2])
 
+# === CỘT TRÁI: TẢI FILE ===
 with col1:
-    st.subheader("📁 Tải file (PDF, DOCX, DOC, TXT)")
-    uploaded = st.file_uploader(
-        "Chọn file (hỗ trợ: .pdf .docx .doc .txt) — có thể nhiều file",
+    st.subheader("📂 Tải file văn bản (PDF, DOCX, DOC, TXT)")
+    uploaded_files = st.file_uploader(
+        "Chọn file (có thể nhiều)",
         type=["pdf", "docx", "doc", "txt"],
         accept_multiple_files=True
     )
 
-    if uploaded:
-        for f in uploaded:
-            if f.name in st.session_state.files_text:
-                continue  # đã có
-            fname = f.name.lower()
-            extracted = ""
+    if uploaded_files:
+        for file in uploaded_files:
+            if file.name not in st.session_state.uploaded_files:
+                text = extract_text(file)
+                if text:
+                    st.session_state.uploaded_files[file.name] = text
+        st.success(f"✅ Đã tải {len(st.session_state.uploaded_files)} file.")
 
-            # ===== PDF =====
-            if fname.endswith(".pdf"):
-                if PdfReader is None:
-                    st.error("Module `pypdf`/`PyPDF2` chưa được cài — thêm vào requirements.txt (`pypdf` hoặc `PyPDF2`).")
-                    continue
-                try:
-                    reader = PdfReader(f)
-                    pages = []
-                    for p in reader.pages:
-                        # extract_text may be None on scanned PDF
-                        txt = p.extract_text()
-                        pages.append(txt or "")
-                    extracted = "\n".join(pages).strip()
-                    if not extracted:
-                        st.warning(f"⚠️ Không trích được text từ {f.name}. Có thể là PDF dạng ảnh/scan.")
-                except Exception as e:
-                    st.error(f"Lỗi khi đọc PDF {f.name}: {e}")
-                    continue
+    if st.session_state.uploaded_files:
+        if st.button("🧹 Xóa tất cả file"):
+            st.session_state.uploaded_files.clear()
+            st.rerun()
 
-            # ===== DOCX =====
-            elif fname.endswith(".docx"):
-                if Document is None:
-                    st.error("Module `python-docx` chưa được cài — thêm `python-docx` vào requirements.txt.")
-                    continue
-                try:
-                    doc = Document(f)
-                    extracted = "\n".join([p.text for p in doc.paragraphs]).strip()
-                except Exception as e:
-                    st.error(f"Lỗi khi đọc DOCX {f.name}: {e}")
-                    continue
-
-            # ===== DOC (old) =====
-            elif fname.endswith(".doc"):
-                if docx2txt is None:
-                    st.warning(f"Không có `docx2txt` để đọc .doc — bạn có thể chuyển .doc sang .docx trước khi tải lên.")
-                    # thử dùng textract nếu có (không bao gồm ở đây vì yêu cầu hệ thống)
-                    # lưu tạm và tiếp tục (không trích được)
-                    extracted = ""
-                else:
-                    try:
-                        # docx2txt.process cần đường dẫn file
-                        with NamedTemporaryFile(delete=False, suffix=".doc") as tmp:
-                            tmp.write(f.getvalue())
-                            tmp_path = tmp.name
-                        try:
-                            extracted = docx2txt.process(tmp_path) or ""
-                        finally:
-                            if os.path.exists(tmp_path):
-                                os.remove(tmp_path)
-                    except Exception as e:
-                        st.error(f"Lỗi khi đọc .doc {f.name}: {e}")
-                        continue
-
-            # ===== TXT =====
-            elif fname.endswith(".txt"):
-                try:
-                    extracted = StringIO(f.getvalue().decode("utf-8", errors="ignore")).read()
-                except Exception:
-                    try:
-                        extracted = f.getvalue().decode("latin-1", errors="ignore")
-                    except Exception as e:
-                        st.error(f"Lỗi đọc TXT {f.name}: {e}")
-                        continue
-            else:
-                st.warning(f"Định dạng không hỗ trợ: {f.name}")
-                continue
-
-            # lưu nếu có nội dung (dù rỗng - vẫn lưu tên file để thông báo)
-            st.session_state.files_text[f.name] = extracted
-
-    if st.session_state.files_text:
-        if st.button("🧹 Xóa tất cả file đã tải"):
-            st.session_state.files_text.clear()
-            st.experimental_rerun()
-
+# === CỘT PHẢI: TRA CỨU ===
 with col2:
-    st.subheader("🔎 Tìm kiếm nội dung trong các file đã tải")
-    if not st.session_state.files_text:
-        st.info("📌 Vui lòng tải file lên bên trái trước khi tìm kiếm.")
+    st.subheader("🔎 Tìm kiếm trong văn bản")
+
+    if not st.session_state.uploaded_files:
+        st.info("📌 Vui lòng tải file trước khi tìm kiếm.")
     else:
-        keyword = st.text_input("Nhập từ khóa cần tìm (không phân biệt hoa thường)")
-        search_btn = st.button("Tìm kiếm")
+        keyword = st.text_input("Nhập từ khóa cần tìm (ví dụ: xử phạt, hợp đồng lao động...)")
 
-        if (keyword and search_btn) or (keyword and not search_btn and st.session_state.get("auto_search", True)):
-            kw = keyword.strip().lower()
-            if not kw:
-                st.warning("Vui lòng nhập từ khóa hợp lệ.")
+        if keyword:
+            results = []
+            for fname, text in st.session_state.uploaded_files.items():
+                text_lower = text.lower()
+                kw_lower = keyword.lower()
+                idx = text_lower.find(kw_lower)
+                while idx != -1:
+                    start = max(0, idx - 200)
+                    end = min(len(text), idx + len(keyword) + 200)
+                    snippet = text[start:end].replace("\n", " ").strip()
+                    results.append((fname, snippet))
+                    idx = text_lower.find(kw_lower, idx + len(keyword))
+
+            if not results:
+                st.warning("❌ Không tìm thấy kết quả.")
             else:
-                results = []
-                for fname, text in st.session_state.files_text.items():
-                    if not text:
-                        continue
-                    t_lower = text.lower()
-                    start_idx = 0
-                    while True:
-                        idx = t_lower.find(kw, start_idx)
-                        if idx == -1:
-                            break
-                        start = max(0, idx - 200)
-                        end = min(len(text), idx + len(kw) + 200)
-                        snippet = text[start:end].replace("\n", " ").strip()
-                        results.append({"file": fname, "snippet": snippet})
-                        start_idx = idx + len(kw)
+                st.success(f"🔍 Tìm thấy {len(results)} kết quả.")
+                for fname, snippet in results[:50]:
+                    highlight = snippet.replace(keyword, f"**:orange[{keyword}]**")
+                    st.markdown(f"**📜 Trích đoạn:** {highlight}")
+                    st.caption(f"📁 Nguồn: {fname}")
+                    st.divider()
 
-                if not results:
-                    st.warning("❌ Không tìm thấy kết quả nào.")
-                else:
-                    st.success(f"🔎 Tìm thấy {len(results)} kết quả.")
-                    for r in results:
-                        # highlight (simple)
-                        display_snip = r["snippet"].replace(keyword, f"**:orange[{keyword}]**")
-                        st.markdown(f"**📜 Trích đoạn:** {display_snip}")
-                        st.caption(f"📁 Nguồn: {r['file']}")
-                        st.divider()
-
-# Hướng dẫn nhỏ
-with st.expander("📘 Ghi chú"):
-    st.write("- App này **không** dùng pdfplumber/pytesseract nên dễ deploy trên Streamlit Cloud.")
-    st.write("- Nếu PDF là **scan/ảnh**, PyPDF2/Pypdf sẽ không trích text được — cần OCR.")
-    st.write("- Để hỗ trợ OCR trên môi trường deploy, bạn phải cài phần mềm hệ thống (ví dụ tesseract), điều này thường không có trong Streamlit Cloud.")
-    st.write("- Nếu bạn cần đọc .doc (cũ) tốt hơn, upload file .docx thay thế hoặc chuyển .doc → .docx rồi thử lại.")
+# === HƯỚNG DẪN ===
+with st.expander("📘 Hướng dẫn sử dụng"):
+    st.write("- Hỗ trợ **PDF thường, PDF scan, DOCX, DOC, TXT**.")
+    st.write("- Nếu PDF là **ảnh scan**, hệ thống tự dùng OCR để nhận dạng.")
+    st.write("- Nhập từ khóa → hiển thị đoạn văn có chứa từ khóa và nguồn file.")
+    st.write("- Ví dụ: nhập “xử phạt” để tìm nội dung tương ứng trong các file đã tải.")
