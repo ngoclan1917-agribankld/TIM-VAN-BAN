@@ -2,3 +2,7 @@ streamlit
 pandas
 python-docx
 chardet
+pdfplumber
+pdf2image
+pytesseract
+pillow
