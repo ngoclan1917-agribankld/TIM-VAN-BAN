@@ -11,6 +11,15 @@ import pdfplumber
 from pdf2image import convert_from_bytes
 import pytesseract
 from PIL import Image
+import nltk
+
+# ==========================
+# ⚙️ TẢI BỘ TÁCH CÂU CHO NLTK
+# ==========================
+try:
+    nltk.data.find("tokenizers/punkt")
+except LookupError:
+    nltk.download("punkt")
 
 # ==========================
 # ⚙️ CẤU HÌNH GIAO DIỆN
@@ -61,10 +70,9 @@ def read_text_from_file(file):
             tmp_docx_path = tmp_doc_path + "x"
             try:
                 subprocess.run(
-                    ["soffice", "--headless", "--convert-to", "docx", "--outdir", os.path.dirname(tmp_docx_path), tmp_doc_path],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
+                    ["soffice", "--headless", "--convert-to", "docx",
+                     "--outdir", os.path.dirname(tmp_docx_path), tmp_doc_path],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
                 )
                 doc = Document(tmp_docx_path)
                 text = "\n".join(p.text for p in doc.paragraphs)
@@ -87,7 +95,7 @@ def read_text_from_file(file):
 
         elif ext in ["png", "jpg", "jpeg", "tiff"]:
             img = Image.open(file)
-            text = pytesseract.image_to_string(img, lang="vie")
+            text = pytesseract.image_to_string(img, lang="vie+eng")
 
         else:
             st.warning(f"⚠️ Định dạng {ext} chưa được hỗ trợ.")
@@ -113,11 +121,36 @@ def extract_text_from_pdf(file_bytes):
         try:
             images = convert_from_bytes(file_bytes.getvalue())
             for img in images:
-                text += pytesseract.image_to_string(img, lang="vie") + "\n\n"
+                text += pytesseract.image_to_string(img, lang="vie+eng") + "\n\n"
         except Exception as e:
             st.error(f"❌ Lỗi OCR PDF: {e}")
 
     return text.strip()
+
+# ==========================
+# 💬 HÀM TÌM KIẾM NỘI DUNG
+# ==========================
+def tim_trong_van_ban(keyword, dataframe):
+    """Tìm đoạn văn chứa từ khóa, mở rộng ngữ cảnh đủ ý"""
+    kw = keyword.strip().lower()
+    results = []
+
+    for _, row in dataframe.iterrows():
+        sentences = nltk.sent_tokenize(row["NỘI_DUNG"])
+        matched_blocks = []
+
+        for i, sentence in enumerate(sentences):
+            if kw in sentence.lower():
+                # Mở rộng linh hoạt 1–3 câu tùy độ dài đoạn
+                start = max(0, i - 2)
+                end = min(len(sentences), i + 3)
+                snippet = " ".join(sentences[start:end]).strip()
+                matched_blocks.append(snippet)
+
+        for block in matched_blocks:
+            results.append({"TRICH_DOAN": block, "TÊN_FILE": row["TÊN_FILE"]})
+
+    return pd.DataFrame(results)
 
 # ==========================
 # 🧭 2 CỘT GIAO DIỆN
@@ -163,31 +196,8 @@ with col2:
     if st.session_state.uploaded_files:
         combined_df = pd.concat(st.session_state.uploaded_files.values(), ignore_index=True)
 
-        user_input = st.text_input(
-            "🔎 Nhập từ khóa cần tìm (Enter hoặc nhấn nút):",
-            key="search_input"
-        )
+        user_input = st.text_input("🔎 Nhập từ khóa cần tìm (Enter hoặc nhấn nút):", key="search_input")
         search_btn = st.button("🔍 Tìm kiếm")
-
-        def tim_trong_van_ban(keyword, dataframe):
-            """Tìm đoạn văn chứa từ khóa, giữ ngắt dòng"""
-            kw = keyword.strip().lower()
-            results = []
-            for _, row in dataframe.iterrows():
-                lines = row["NỘI_DUNG"].split("\n")
-                matched_blocks = []
-                for i, line in enumerate(lines):
-                    if kw in line.lower():
-                        start = max(0, i - 2)
-                        end = min(len(lines), i + 3)
-                        snippet = "\n".join(lines[start:end]).strip()
-                        matched_blocks.append(snippet)
-                for block in matched_blocks:
-                    results.append({
-                        "TRICH_DOAN": block,
-                        "TÊN_FILE": row["TÊN_FILE"]
-                    })
-            return pd.DataFrame(results)
 
         if (user_input and st.session_state.search_input) or search_btn:
             keyword = user_input.strip()
@@ -216,9 +226,9 @@ with col2:
 # ==========================
 with st.expander("📘 Hướng dẫn sử dụng"):
     st.markdown("""
-    - Tải file **PDF (có thể là scan)**, **DOC/DOCX**, **TXT** hoặc **ảnh (PNG/JPG)**.
-    - Nhập từ khóa → nhấn **Enter** hoặc nút **🔍 Tìm kiếm**.
-    - Ứng dụng chỉ hiển thị **đoạn văn có chứa từ khóa**, không phải toàn bộ file.
-    - Giữ **nguyên ngắt dòng và bố cục** của nội dung gốc.
+    - Tải file **PDF (kể cả scan)**, **DOC/DOCX**, **TXT** hoặc **ảnh (PNG/JPG)**.
+    - Nhập từ khóa → nhấn **Enter** hoặc **🔍 Tìm kiếm**.
+    - Ứng dụng hiển thị **đoạn văn chứa từ khóa**, mở rộng linh hoạt để đủ ý.
+    - Giữ **ngắt dòng và bố cục gốc**.
     - Cụm từ khóa được **bôi đỏ, đậm** để dễ nhận biết.
     """)
