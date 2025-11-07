@@ -1,21 +1,14 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO, StringIO
+from io import BytesIO
 from docx import Document
-import chardet
-import re
 import tempfile
 import os
 import subprocess
-import pdfplumber
-from pdf2image import convert_from_bytes
-import pytesseract
-from PIL import Image
+import re
 import nltk
 
-# ==========================
-# ⚙️ TẢI BỘ TÁCH CÂU CHO NLTK
-# ==========================
+# Tải bộ tách câu (nếu chưa có)
 try:
     nltk.data.find("tokenizers/punkt")
 except LookupError:
@@ -24,9 +17,9 @@ except LookupError:
 # ==========================
 # ⚙️ CẤU HÌNH GIAO DIỆN
 # ==========================
-st.set_page_config(page_title="📜 Tra cứu Văn bản Quy định", page_icon="📘", layout="wide")
-st.title("📜 ỨNG DỤNG TRA CỨU NỘI DUNG VĂN BẢN QUY ĐỊNH")
-st.markdown("📂 **Bên trái:** Tải file văn bản — 💬 **Bên phải:** Nhập từ khóa để tìm kiếm nội dung liên quan.")
+st.set_page_config(page_title="📘 Tra cứu Văn bản Word", page_icon="📄", layout="wide")
+st.title("📘 ỨNG DỤNG TRA CỨU NỘI DUNG VĂN BẢN WORD")
+st.markdown("📂 **Bên trái:** Tải file DOC/DOCX — 💬 **Bên phải:** Nhập từ khóa để tìm kiếm nội dung.")
 
 # ==========================
 # 🧠 SESSION STATE
@@ -39,22 +32,19 @@ if "uploader_key" not in st.session_state:
 # ==========================
 # 🎨 CSS TÙY CHỈNH
 # ==========================
-st.markdown(
-    """
-    <style>
-    div[data-testid="column"]:first-child { margin-right: 60px !important; }
-    .highlight-red { color: red; font-weight: bold; }
-    .text-block { white-space: pre-wrap; font-family: 'Times New Roman', serif; line-height: 1.6; }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("""
+<style>
+div[data-testid="column"]:first-child { margin-right: 60px !important; }
+.highlight-red { color: red; font-weight: bold; }
+.text-block { white-space: pre-wrap; font-family: 'Times New Roman', serif; line-height: 1.6; }
+</style>
+""", unsafe_allow_html=True)
 
 # ==========================
-# 📂 HÀM ĐỌC FILE
+# 📂 HÀM ĐỌC FILE DOC/DOCX
 # ==========================
 def read_text_from_file(file):
-    """Đọc nội dung từ DOC/DOCX/TXT/PDF/ẢNH và giữ ngắt dòng"""
+    """Đọc nội dung từ file DOC hoặc DOCX"""
     text = ""
     ext = file.name.lower().split(".")[-1]
 
@@ -76,62 +66,24 @@ def read_text_from_file(file):
                 )
                 doc = Document(tmp_docx_path)
                 text = "\n".join(p.text for p in doc.paragraphs)
-            except Exception:
-                st.error("❌ Không thể đọc file DOC. Cần cài LibreOffice (soffice).")
+            except Exception as e:
+                st.error(f"❌ Không thể đọc file DOC ({file.name}): {e}")
             finally:
                 for path in [tmp_doc_path, tmp_docx_path]:
                     if os.path.exists(path):
                         os.remove(path)
-
-        elif ext == "txt":
-            raw = file.read()
-            enc = chardet.detect(raw)["encoding"] or "utf-8"
-            stringio = StringIO(raw.decode(enc, errors="ignore"))
-            text = stringio.read()
-
-        elif ext == "pdf":
-            file_bytes = BytesIO(file.read())
-            text = extract_text_from_pdf(file_bytes)
-
-        elif ext in ["png", "jpg", "jpeg", "tiff"]:
-            img = Image.open(file)
-            text = pytesseract.image_to_string(img, lang="vie+eng")
-
         else:
-            st.warning(f"⚠️ Định dạng {ext} chưa được hỗ trợ.")
+            st.warning("⚠️ Chỉ hỗ trợ file DOC hoặc DOCX.")
     except Exception as e:
         st.error(f"❌ Lỗi đọc file {file.name}: {e}")
 
     return text.strip()
 
-
-def extract_text_from_pdf(file_bytes):
-    """Đọc PDF (ưu tiên text, fallback OCR nếu scan)"""
-    text = ""
-    try:
-        with pdfplumber.open(file_bytes) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text(x_tolerance=1, y_tolerance=1)
-                if page_text:
-                    text += page_text + "\n\n"
-    except Exception:
-        pass
-
-    if not text.strip():
-        try:
-            images = convert_from_bytes(file_bytes.getvalue())
-            for img in images:
-                text += pytesseract.image_to_string(img, lang="vie+eng") + "\n\n"
-        except Exception as e:
-            st.error(f"❌ Lỗi OCR PDF: {e}")
-
-    return text.strip()
-
 # ==========================
-# 💬 HÀM TÌM KIẾM NỘI DUNG
+# 🔍 HÀM TÌM KIẾM NGẮT CÂU ĐỦ Ý
 # ==========================
 def tim_trong_van_ban(keyword, dataframe):
-    """Tìm đoạn văn chứa từ khóa, mở rộng ngữ cảnh đủ ý"""
+    """Tìm đoạn văn có chứa từ khóa, ngắt câu đủ ý"""
     kw = keyword.strip().lower()
     results = []
 
@@ -141,15 +93,17 @@ def tim_trong_van_ban(keyword, dataframe):
 
         for i, sentence in enumerate(sentences):
             if kw in sentence.lower():
-                # Mở rộng linh hoạt 1–3 câu tùy độ dài đoạn
+                # Mở rộng 1–3 câu tùy ngữ cảnh để đảm bảo đủ ý
                 start = max(0, i - 2)
                 end = min(len(sentences), i + 3)
                 snippet = " ".join(sentences[start:end]).strip()
                 matched_blocks.append(snippet)
 
         for block in matched_blocks:
-            results.append({"TRICH_DOAN": block, "TÊN_FILE": row["TÊN_FILE"]})
-
+            results.append({
+                "TRICH_DOAN": block,
+                "TÊN_FILE": row["TÊN_FILE"]
+            })
     return pd.DataFrame(results)
 
 # ==========================
@@ -161,11 +115,11 @@ col1, col2 = st.columns([1, 2])
 # 📁 CỘT TRÁI — TẢI FILE
 # ==========================
 with col1:
-    st.subheader("📂 Tải file văn bản")
+    st.subheader("📂 Tải file Word")
 
     uploaded_files = st.file_uploader(
-        "Chọn file (PDF, DOC, DOCX, TXT, Ảnh)",
-        type=["pdf", "docx", "doc", "txt", "png", "jpg", "jpeg", "tiff"],
+        "Chọn file (.doc hoặc .docx, có thể nhiều)",
+        type=["doc", "docx"],
         accept_multiple_files=True,
         key=f"uploader_{st.session_state.uploader_key}"
     )
@@ -219,16 +173,16 @@ with col2:
             else:
                 st.info("⚠️ Nhập từ khóa để tìm kiếm.")
     else:
-        st.info("📌 Hãy tải ít nhất một file văn bản để bắt đầu.")
+        st.info("📌 Hãy tải ít nhất một file DOC/DOCX để bắt đầu.")
 
 # ==========================
 # 📘 HƯỚNG DẪN
 # ==========================
 with st.expander("📘 Hướng dẫn sử dụng"):
     st.markdown("""
-    - Tải file **PDF (kể cả scan)**, **DOC/DOCX**, **TXT** hoặc **ảnh (PNG/JPG)**.
-    - Nhập từ khóa → nhấn **Enter** hoặc **🔍 Tìm kiếm**.
-    - Ứng dụng hiển thị **đoạn văn chứa từ khóa**, mở rộng linh hoạt để đủ ý.
-    - Giữ **ngắt dòng và bố cục gốc**.
-    - Cụm từ khóa được **bôi đỏ, đậm** để dễ nhận biết.
+    - Tải file **DOC hoặc DOCX** (có thể nhiều file cùng lúc).
+    - Nhập **từ khóa** → nhấn **Enter** hoặc **🔍 Tìm kiếm**.
+    - Ứng dụng hiển thị **đoạn văn chứa từ khóa**, mở rộng vài câu trước/sau để đủ ý.
+    - Giữ nguyên **ngắt dòng, định dạng gốc**.
+    - Cụm từ khóa được **bôi đỏ, in đậm** để dễ nhận biết.
     """)
