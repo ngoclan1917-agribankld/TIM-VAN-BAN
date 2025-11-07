@@ -6,13 +6,7 @@ import tempfile
 import os
 import subprocess
 import re
-import nltk
-
-# Tải bộ tách câu (nếu chưa có)
-try:
-    nltk.data.find("tokenizers/punkt")
-except LookupError:
-    nltk.download("punkt")
+import nltk.data
 
 # ==========================
 # ⚙️ CẤU HÌNH GIAO DIỆN
@@ -30,7 +24,7 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 
 # ==========================
-# 🎨 CSS TÙY CHỈNH
+# 🎨 CSS
 # ==========================
 st.markdown("""
 <style>
@@ -41,10 +35,9 @@ div[data-testid="column"]:first-child { margin-right: 60px !important; }
 """, unsafe_allow_html=True)
 
 # ==========================
-# 📂 HÀM ĐỌC FILE DOC/DOCX
+# 📄 HÀM ĐỌC FILE DOC/DOCX
 # ==========================
 def read_text_from_file(file):
-    """Đọc nội dung từ file DOC hoặc DOCX"""
     text = ""
     ext = file.name.lower().split(".")[-1]
 
@@ -80,25 +73,23 @@ def read_text_from_file(file):
     return text.strip()
 
 # ==========================
-# 🔍 HÀM TÌM KIẾM NGẮT CÂU ĐỦ Ý
+# 🔍 HÀM TÌM KIẾM (SỬ DỤNG TOKENIZER NLTK)
 # ==========================
 def tim_trong_van_ban(keyword, dataframe):
     """Tìm đoạn văn có chứa từ khóa, ngắt câu đủ ý"""
     kw = keyword.strip().lower()
     results = []
+    tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')  # ✅ Không cần download động
 
     for _, row in dataframe.iterrows():
-        sentences = nltk.sent_tokenize(row["NỘI_DUNG"])
+        sentences = tokenizer.tokenize(row["NỘI_DUNG"])
         matched_blocks = []
-
         for i, sentence in enumerate(sentences):
             if kw in sentence.lower():
-                # Mở rộng 1–3 câu tùy ngữ cảnh để đảm bảo đủ ý
                 start = max(0, i - 2)
                 end = min(len(sentences), i + 3)
                 snippet = " ".join(sentences[start:end]).strip()
                 matched_blocks.append(snippet)
-
         for block in matched_blocks:
             results.append({
                 "TRICH_DOAN": block,
@@ -149,7 +140,6 @@ with col2:
 
     if st.session_state.uploaded_files:
         combined_df = pd.concat(st.session_state.uploaded_files.values(), ignore_index=True)
-
         user_input = st.text_input("🔎 Nhập từ khóa cần tìm (Enter hoặc nhấn nút):", key="search_input")
         search_btn = st.button("🔍 Tìm kiếm")
 
