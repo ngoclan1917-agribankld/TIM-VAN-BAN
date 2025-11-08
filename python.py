@@ -1,178 +1,323 @@
 import streamlit as st
-import pandas as pd
-from io import BytesIO
 from docx import Document
-import tempfile
-import os
-import subprocess
+import mammoth
+from unidecode import unidecode
+import io
 import re
-import nltk.data
+import hashlib
 
 # ==========================
 # ⚙️ CẤU HÌNH GIAO DIỆN
 # ==========================
-st.set_page_config(page_title="📘 Tra cứu Văn bản Word", page_icon="📄", layout="wide")
-st.title("📘 ỨNG DỤNG TRA CỨU NỘI DUNG VĂN BẢN WORD")
-st.markdown("📂 **Bên trái:** Tải file DOC/DOCX — 💬 **Bên phải:** Nhập từ khóa để tìm kiếm nội dung.")
+st.set_page_config(
+    page_title="📄 Tra cứu văn bản Word",
+    page_icon="📘",
+    layout="wide"
+)
+
+st.title("📄 ỨNG DỤNG TRA CỨU NỘI DUNG VĂN BẢN (.DOC, .DOCX)")
+st.markdown(
+    """
+    - 📂 **Bên trái:** Tải file `.doc`, `.docx` cần tra cứu  
+    - 🔎 **Bên phải:** Nhập từ khóa → Nhấn **Enter** hoặc nút **"Tìm kiếm"** để xem các đoạn chứa từ khóa kèm ngữ cảnh 3–4 câu.
+    """
+)
 
 # ==========================
-# 🧠 SESSION STATE
+# ⚙️ HẰNG SỐ
 # ==========================
-if "uploaded_files" not in st.session_state:
-    st.session_state.uploaded_files = {}
-if "uploader_key" not in st.session_state:
-    st.session_state.uploader_key = 0
+CONTEXT_BEFORE = 3   # số câu trước từ khóa
+CONTEXT_AFTER = 3    # số câu sau từ khóa
 
 # ==========================
-# 🎨 CSS
+# 🧩 HÀM XỬ LÝ CƠ BẢN
 # ==========================
-st.markdown("""
-<style>
-div[data-testid="column"]:first-child { margin-right: 60px !important; }
-.highlight-red { color: red; font-weight: bold; }
-.text-block { white-space: pre-wrap; font-family: 'Times New Roman', serif; line-height: 1.6; }
-</style>
-""", unsafe_allow_html=True)
 
-# ==========================
-# 📄 HÀM ĐỌC FILE DOC/DOCX
-# ==========================
-def read_text_from_file(file):
-    text = ""
-    ext = file.name.lower().split(".")[-1]
+def extract_text_from_docx(file_bytes: bytes) -> str:
+    """Đọc nội dung từ file .docx, trả về text đơn giản, giữ xuống dòng."""
+    doc = Document(io.BytesIO(file_bytes))
+    paragraphs = []
+    for p in doc.paragraphs:
+        text = p.text.strip()
+        if text:
+            paragraphs.append(text)
+    return "\n".join(paragraphs)
 
-    try:
-        if ext == "docx":
-            doc = Document(file)
-            text = "\n".join(p.text for p in doc.paragraphs)
 
-        elif ext == "doc":
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".doc") as tmp_doc:
-                tmp_doc.write(file.read())
-                tmp_doc_path = tmp_doc.name
-            tmp_docx_path = tmp_doc_path + "x"
-            try:
-                subprocess.run(
-                    ["soffice", "--headless", "--convert-to", "docx",
-                     "--outdir", os.path.dirname(tmp_docx_path), tmp_doc_path],
-                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                doc = Document(tmp_docx_path)
-                text = "\n".join(p.text for p in doc.paragraphs)
-            except Exception as e:
-                st.error(f"❌ Không thể đọc file DOC ({file.name}): {e}")
-            finally:
-                for path in [tmp_doc_path, tmp_docx_path]:
-                    if os.path.exists(path):
-                        os.remove(path)
-        else:
-            st.warning("⚠️ Chỉ hỗ trợ file DOC hoặc DOCX.")
-    except Exception as e:
-        st.error(f"❌ Lỗi đọc file {file.name}: {e}")
-
+def extract_text_from_doc(file_bytes: bytes) -> str:
+    """Đọc nội dung từ file .doc bằng mammoth, chuyển HTML -> text đơn giản."""
+    result = mammoth.convert_to_html(io.BytesIO(file_bytes))
+    html = result.value
+    # Bỏ tag HTML đơn giản để lấy text
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = re.sub(r"\s+\n", "\n", text)
+    text = re.sub(r"\n\s+", "\n", text)
+    text = re.sub(r"\s{2,}", " ", text)
     return text.strip()
 
+
+def split_into_sentences(text: str):
+    """
+    Tách câu tối ưu cho văn bản quy định / tiếng Việt.
+    Không hoàn hảo 100%, nhưng đủ nhanh & ổn định.
+    """
+    # Chuẩn hóa xuống dòng thành dấu phân tách nhẹ
+    normalized = text.replace("\r", "\n")
+    normalized = re.sub(r"\n+", "\n", normalized)
+
+    # Tạm thời thay xuống dòng bằng ký hiệu đặc biệt để giữ cấu trúc đoạn
+    placeholder = " <NL> "
+    normalized = normalized.replace("\n", placeholder)
+
+    # Regex tách câu: sau . ! ? … ; rồi có khoảng trắng + chữ cái/ số / mở ngoặc / ngoặc kép
+    pattern = r'(?<=[\.!\?…;])\s+(?=[A-ZÀ-ỴÂÊÔƠƯĐ0-9“"(\[])'
+    raw_sentences = re.split(pattern, normalized)
+
+    sentences = []
+    for s in raw_sentences:
+        s = s.strip()
+        if not s:
+            continue
+        # Trả lại xuống dòng
+        s = s.replace(placeholder, "\n")
+        # Loại bỏ câu quá ngắn rác
+        if len(s) > 1:
+            sentences.append(s)
+    return sentences
+
+
+def normalize_for_search(text: str) -> str:
+    """Chuẩn hóa để tìm kiếm: bỏ dấu, lower."""
+    return unidecode(text).lower()
+
+
+def highlight_keyword(text: str, keywords):
+    """
+    Tô đậm/bôi vàng từ khóa trong đoạn kết quả.
+    keywords: list từ khóa gốc (giữ nguyên dấu).
+    """
+    if not keywords:
+        return text
+
+    # Sắp xếp từ khóa dài trước để tránh lồng nhau
+    keywords_sorted = sorted(set([k for k in keywords if k.strip()]), key=len, reverse=True)
+
+    def repl_factory(pattern):
+        regex = re.compile(pattern, flags=re.IGNORECASE)
+
+        def _repl(match):
+            return f"<mark><b>{match.group(0)}</b></mark>"
+        return regex, _repl
+
+    result = text
+    for kw in keywords_sorted:
+        pattern = re.escape(kw)
+        regex, repl = repl_factory(pattern)
+        result = regex.sub(repl, result)
+
+    return result
+
+
 # ==========================
-# 🔍 HÀM TÌM KIẾM (SỬ DỤNG TOKENIZER NLTK)
+# 🧠 CACHE XỬ LÝ FILE
 # ==========================
-def tim_trong_van_ban(keyword, dataframe):
-    """Tìm đoạn văn có chứa từ khóa, ngắt câu đủ ý"""
-    kw = keyword.strip().lower()
+
+@st.cache_data(show_spinner=False)
+def build_index(files_payload):
+    """
+    Từ danh sách (filename, bytes) → trả về cấu trúc:
+    [
+      {
+        "file_name": str,
+        "sentences": [str, ...],
+        "norm_sentences": [str, ...]  # để tìm kiếm nhanh
+      },
+      ...
+    ]
+    """
+    indexed_docs = []
+
+    for file_name, file_bytes in files_payload:
+        ext = file_name.lower().split(".")[-1]
+
+        try:
+            if ext == "docx":
+                text = extract_text_from_docx(file_bytes)
+            elif ext == "doc":
+                text = extract_text_from_doc(file_bytes)
+            else:
+                continue
+
+            if not text:
+                continue
+
+            sentences = split_into_sentences(text)
+            norm_sentences = [normalize_for_search(s) for s in sentences]
+
+            if sentences:
+                indexed_docs.append(
+                    {
+                        "file_name": file_name,
+                        "sentences": sentences,
+                        "norm_sentences": norm_sentences,
+                    }
+                )
+        except Exception as e:
+            # Ghi log ra UI nếu cần debug
+            st.warning(f"Không đọc được file: {file_name}. Lỗi: {e}")
+
+    return indexed_docs
+
+
+def search_keyword(indexed_docs, query_raw: str, before=3, after=3, max_results_per_file=200):
+    """
+    Tìm kiếm theo từ khóa, trả về danh sách kết quả:
+    [
+      {
+        "file_name": ...,
+        "context": "đoạn trích 3-4 câu trước/sau có highlight"
+      },
+      ...
+    ]
+    Hỗ trợ nhập nhiều từ khóa, ngăn cách bằng dấu ; hoặc ,
+    Điều kiện: câu chứa BẤT KỲ từ khóa nào (OR).
+    """
+    if not query_raw:
+        return []
+
+    # Tách nhiều từ khóa nếu có
+    raw_parts = [p.strip() for p in re.split(r"[;,]", query_raw) if p.strip()]
+    if not raw_parts:
+        return []
+
+    norm_keywords = [normalize_for_search(p) for p in raw_parts]
+
     results = []
-    tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')  # ✅ Không cần download động
 
-    for _, row in dataframe.iterrows():
-        sentences = tokenizer.tokenize(row["NỘI_DUNG"])
-        matched_blocks = []
-        for i, sentence in enumerate(sentences):
-            if kw in sentence.lower():
-                start = max(0, i - 2)
-                end = min(len(sentences), i + 3)
-                snippet = " ".join(sentences[start:end]).strip()
-                matched_blocks.append(snippet)
-        for block in matched_blocks:
-            results.append({
-                "TRICH_DOAN": block,
-                "TÊN_FILE": row["TÊN_FILE"]
-            })
-    return pd.DataFrame(results)
+    for doc in indexed_docs:
+        file_name = doc["file_name"]
+        sentences = doc["sentences"]
+        norm_sentences = doc["norm_sentences"]
+
+        hits = []
+
+        for i, s_norm in enumerate(norm_sentences):
+            if any(kw in s_norm for kw in norm_keywords):
+                hits.append(i)
+
+        if not hits:
+            continue
+
+        # Gom và tạo context
+        used_ranges = []
+        file_results = []
+
+        for hit_idx in hits:
+            start = max(0, hit_idx - before)
+            end = min(len(sentences), hit_idx + after + 1)
+
+            # Tránh trùng lặp vùng với kết quả trước
+            if used_ranges and start <= used_ranges[-1][1]:
+                # merge
+                used_ranges[-1] = (used_ranges[-1][0], max(used_ranges[-1][1], end))
+            else:
+                used_ranges.append((start, end))
+
+        for (start, end) in used_ranges:
+            snippet_sentences = sentences[start:end]
+            snippet_text = " ".join(snippet_sentences).strip()
+            snippet_text = re.sub(r"\s{2,}", " ", snippet_text)
+            snippet_html = highlight_keyword(snippet_text, raw_parts)
+            file_results.append(snippet_html)
+            if len(file_results) >= max_results_per_file:
+                break
+
+        for snippet_html in file_results:
+            results.append(
+                {
+                    "file_name": file_name,
+                    "context_html": snippet_html
+                }
+            )
+
+    return results
+
 
 # ==========================
-# 🧭 2 CỘT GIAO DIỆN
+# 🖥️ GIAO DIỆN 2 CỘT
 # ==========================
+
 col1, col2 = st.columns([1, 2])
 
-# ==========================
-# 📁 CỘT TRÁI — TẢI FILE
-# ==========================
 with col1:
-    st.subheader("📂 Tải file Word")
-
+    st.subheader("📂 Tải văn bản")
     uploaded_files = st.file_uploader(
-        "Chọn file (.doc hoặc .docx, có thể nhiều)",
+        "Chọn một hoặc nhiều file .doc / .docx",
         type=["doc", "docx"],
-        accept_multiple_files=True,
-        key=f"uploader_{st.session_state.uploader_key}"
+        accept_multiple_files=True
     )
 
     if uploaded_files:
-        for file in uploaded_files:
-            if file.name not in st.session_state.uploaded_files:
-                text_content = read_text_from_file(file)
-                if text_content:
-                    df = pd.DataFrame({"NỘI_DUNG": [text_content], "TÊN_FILE": [file.name]})
-                    st.session_state.uploaded_files[file.name] = df
-                    st.success(f"✅ Đã tải: {file.name}")
-                else:
-                    st.warning(f"⚠️ Không thể trích xuất nội dung từ: {file.name}")
-
-    if st.session_state.uploaded_files:
-        if st.button("🧹 Xóa tất cả file"):
-            st.session_state.uploaded_files.clear()
-            st.session_state.uploader_key += 1
-            st.rerun()
-
-# ==========================
-# 💬 CỘT PHẢI — TRA CỨU
-# ==========================
-with col2:
-    st.subheader("💬 Tra cứu nội dung")
-
-    if st.session_state.uploaded_files:
-        combined_df = pd.concat(st.session_state.uploaded_files.values(), ignore_index=True)
-        user_input = st.text_input("🔎 Nhập từ khóa cần tìm (Enter hoặc nhấn nút):", key="search_input")
-        search_btn = st.button("🔍 Tìm kiếm")
-
-        if (user_input and st.session_state.search_input) or search_btn:
-            keyword = user_input.strip()
-            if keyword:
-                results = tim_trong_van_ban(keyword, combined_df)
-                if results.empty:
-                    st.warning("❌ Không tìm thấy nội dung nào phù hợp.")
-                else:
-                    for _, row in results.iterrows():
-                        highlighted = re.sub(
-                            fr"({re.escape(keyword)})",
-                            r'<span class="highlight-red">\1</span>',
-                            row["TRICH_DOAN"],
-                            flags=re.IGNORECASE
-                        )
-                        st.markdown(f'<div class="text-block">{highlighted}</div>', unsafe_allow_html=True)
-                        st.caption(f"📁 Nguồn: *{row['TÊN_FILE']}*")
-                        st.divider()
-            else:
-                st.info("⚠️ Nhập từ khóa để tìm kiếm.")
+        st.success(f"Đã tải {len(uploaded_files)} file.")
+        for f in uploaded_files:
+            st.markdown(f"- {f.name} ({f.size/1024:.1f} KB)")
     else:
-        st.info("📌 Hãy tải ít nhất một file DOC/DOCX để bắt đầu.")
+        st.info("Vui lòng tải lên ít nhất một file để bắt đầu tra cứu.")
 
-# ==========================
-# 📘 HƯỚNG DẪN
-# ==========================
-with st.expander("📘 Hướng dẫn sử dụng"):
-    st.markdown("""
-    - Tải file **DOC hoặc DOCX** (có thể nhiều file cùng lúc).
-    - Nhập **từ khóa** → nhấn **Enter** hoặc **🔍 Tìm kiếm**.
-    - Ứng dụng hiển thị **đoạn văn chứa từ khóa**, mở rộng vài câu trước/sau để đủ ý.
-    - Giữ nguyên **ngắt dòng, định dạng gốc**.
-    - Cụm từ khóa được **bôi đỏ, in đậm** để dễ nhận biết.
-    """)
+with col2:
+    st.subheader("🔍 Tra cứu từ khóa")
+
+    # Form để hỗ trợ Enter = Submit
+    with st.form("search_form", clear_on_submit=False):
+        default_query = st.session_state.get("last_query", "")
+        query = st.text_input(
+            "Nhập từ khóa (có thể nhập nhiều, cách nhau bởi dấu ';' hoặc ',')",
+            value=default_query,
+            placeholder="Ví dụ: hạn mức tín dụng; tài sản bảo đảm; điều kiện vay"
+        )
+        submitted = st.form_submit_button("🔍 Tìm kiếm")
+
+    if submitted:
+        st.session_state["last_query"] = query
+
+        if not uploaded_files:
+            st.warning("Vui lòng tải file ở bên trái trước khi tìm kiếm.")
+        elif not query.strip():
+            st.warning("Vui lòng nhập từ khóa cần tra cứu.")
+        else:
+            # Chuẩn bị dữ liệu cho cache: (tên, bytes)
+            files_payload = []
+            for uf in uploaded_files:
+                content = uf.getvalue()
+                # để cache hiệu quả hơn: thêm hash
+                file_hash = hashlib.md5(content).hexdigest()
+                files_payload.append((f"{uf.name}::{file_hash}", content))
+
+            with st.spinner("Đang xử lý & tra cứu..."):
+                indexed_docs = build_index(files_payload)
+                results = search_keyword(
+                    indexed_docs,
+                    query_raw=query,
+                    before=CONTEXT_BEFORE,
+                    after=CONTEXT_AFTER
+                )
+
+            st.markdown("---")
+            if not results:
+                st.warning("Không tìm thấy kết quả nào chứa từ khóa trong các file đã tải.")
+            else:
+                st.success(f"Tìm thấy {len(results)} đoạn phù hợp trong các văn bản.")
+                for i, item in enumerate(results, start=1):
+                    st.markdown(
+                        f"""
+                        <div style="padding:10px; margin-bottom:8px; border-radius:6px; border:1px solid #ddd;">
+                            <div style="font-size:13px; color:#555;">
+                                <b>File:</b> {item['file_name'].split("::")[0]} &nbsp;|&nbsp; <b>Kết quả #{i}</b>
+                            </div>
+                            <div style="margin-top:4px; font-size:14px; line-height:1.6;">
+                                {item['context_html']}
+                            </div>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
