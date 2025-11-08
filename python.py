@@ -18,23 +18,24 @@ st.set_page_config(
 st.title("📄 ỨNG DỤNG TRA CỨU NỘI DUNG VĂN BẢN (.DOC, .DOCX)")
 st.markdown(
     """
-    - 📂 **Bên trái:** Tải file `.doc`, `.docx` cần tra cứu  
+    - 📂 **Bên trái:** Tải file `.doc`, `.docx` cần tra cứu.  
     - 🔎 **Bên phải:** Nhập từ khóa → Nhấn **Enter** hoặc nút **"Tìm kiếm"** để xem các đoạn chứa từ khóa kèm ngữ cảnh 3–4 câu.
     """
 )
 
 # ==========================
-# ⚙️ HẰNG SỐ
+# ⚙️ THAM SỐ
 # ==========================
 CONTEXT_BEFORE = 3   # số câu trước từ khóa
 CONTEXT_AFTER = 3    # số câu sau từ khóa
+MAX_RESULTS_PER_FILE = 200
 
 # ==========================
-# 🧩 HÀM XỬ LÝ CƠ BẢN
+# 🧩 CÁC HÀM XỬ LÝ
 # ==========================
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
-    """Đọc nội dung từ file .docx, trả về text đơn giản, giữ xuống dòng."""
+    """Đọc nội dung từ file .docx, giữ xuống dòng giữa các đoạn."""
     doc = Document(io.BytesIO(file_bytes))
     paragraphs = []
     for p in doc.paragraphs:
@@ -45,11 +46,12 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
 
 
 def extract_text_from_doc(file_bytes: bytes) -> str:
-    """Đọc nội dung từ file .doc bằng mammoth, chuyển HTML -> text đơn giản."""
+    """Đọc nội dung từ file .doc bằng mammoth, chuyển HTML sang text."""
     result = mammoth.convert_to_html(io.BytesIO(file_bytes))
-    html = result.value
-    # Bỏ tag HTML đơn giản để lấy text
+    html = result.value or ""
+    # Loại bỏ tag HTML đơn giản
     text = re.sub(r"<[^>]+>", " ", html)
+    # Chuẩn hoá khoảng trắng & xuống dòng
     text = re.sub(r"\s+\n", "\n", text)
     text = re.sub(r"\n\s+", "\n", text)
     text = re.sub(r"\s{2,}", " ", text)
@@ -58,86 +60,89 @@ def extract_text_from_doc(file_bytes: bytes) -> str:
 
 def split_into_sentences(text: str):
     """
-    Tách câu tối ưu cho văn bản quy định / tiếng Việt.
-    Không hoàn hảo 100%, nhưng đủ nhanh & ổn định.
+    Tách câu đơn giản, ưu tiên nhanh & ổn định.
+    Vẫn giữ xuống dòng bằng placeholder rồi trả lại.
     """
-    # Chuẩn hóa xuống dòng thành dấu phân tách nhẹ
+    if not text:
+        return []
+
+    # Chuẩn hoá xuống dòng
     normalized = text.replace("\r", "\n")
     normalized = re.sub(r"\n+", "\n", normalized)
 
-    # Tạm thời thay xuống dòng bằng ký hiệu đặc biệt để giữ cấu trúc đoạn
-    placeholder = " <NL> "
-    normalized = normalized.replace("\n", placeholder)
+    placeholder = "<NL>"
+    normalized = normalized.replace("\n", f" {placeholder} ")
 
-    # Regex tách câu: sau . ! ? … ; rồi có khoảng trắng + chữ cái/ số / mở ngoặc / ngoặc kép
-    pattern = r'(?<=[\.!\?…;])\s+(?=[A-ZÀ-ỴÂÊÔƠƯĐ0-9“"(\[])'
-    raw_sentences = re.split(pattern, normalized)
+    # Tách sau các dấu . ! ? … ;
+    parts = re.split(r'(?<=[\.!\?…;])\s+', normalized)
 
     sentences = []
-    for s in raw_sentences:
-        s = s.strip()
+    for part in parts:
+        s = part.strip()
         if not s:
             continue
-        # Trả lại xuống dòng
-        s = s.replace(placeholder, "\n")
-        # Loại bỏ câu quá ngắn rác
-        if len(s) > 1:
+        s = s.replace(placeholder, "\n").strip()
+        if len(s) > 0:
             sentences.append(s)
+
+    # Nếu vì lý do nào đó không tách được, coi toàn bộ là 1 câu
+    if not sentences and text.strip():
+        sentences = [text.strip()]
+
     return sentences
 
 
 def normalize_for_search(text: str) -> str:
-    """Chuẩn hóa để tìm kiếm: bỏ dấu, lower."""
-    return unidecode(text).lower()
+    """Chuẩn hóa để so khớp: bỏ dấu, lower, remove dư khoảng trắng."""
+    return re.sub(r"\s+", " ", unidecode(text).lower()).strip()
 
 
-def highlight_keyword(text: str, keywords):
+def highlight_keyword(text: str, raw_keywords):
     """
-    Tô đậm/bôi vàng từ khóa trong đoạn kết quả.
-    keywords: list từ khóa gốc (giữ nguyên dấu).
+    Bôi vàng + in đậm các từ khóa trong đoạn kết quả.
+    Dùng từ khóa gốc (giữ dấu), không ảnh hưởng tốc độ.
     """
-    if not keywords:
+    if not raw_keywords:
         return text
 
-    # Sắp xếp từ khóa dài trước để tránh lồng nhau
-    keywords_sorted = sorted(set([k for k in keywords if k.strip()]), key=len, reverse=True)
-
-    def repl_factory(pattern):
-        regex = re.compile(pattern, flags=re.IGNORECASE)
-
-        def _repl(match):
-            return f"<mark><b>{match.group(0)}</b></mark>"
-        return regex, _repl
+    # Lọc & sắp xếp từ khóa dài trước
+    keywords = sorted(
+        {kw.strip() for kw in raw_keywords if kw.strip()},
+        key=len,
+        reverse=True
+    )
 
     result = text
-    for kw in keywords_sorted:
+    for kw in keywords:
         pattern = re.escape(kw)
-        regex, repl = repl_factory(pattern)
-        result = regex.sub(repl, result)
+        regex = re.compile(pattern, flags=re.IGNORECASE)
+        result = regex.sub(lambda m: f"<mark><b>{m.group(0)}</b></mark>", result)
 
     return result
 
 
 # ==========================
-# 🧠 CACHE XỬ LÝ FILE
+# 🧠 XÂY DỰNG CHỈ MỤC (CACHE)
 # ==========================
 
 @st.cache_data(show_spinner=False)
-def build_index(files_payload):
+def build_index(files_meta):
     """
-    Từ danh sách (filename, bytes) → trả về cấu trúc:
+    files_meta: danh sách tuple (file_name, file_hash, file_bytes)
+
+    Trả về:
     [
       {
-        "file_name": str,
+        "file_name": str,              # tên hiển thị
         "sentences": [str, ...],
-        "norm_sentences": [str, ...]  # để tìm kiếm nhanh
+        "norm_sentences": [str, ...],  # để tìm nhanh
       },
       ...
     ]
     """
     indexed_docs = []
 
-    for file_name, file_bytes in files_payload:
+    for file_name, file_hash, file_bytes in files_meta:
         ext = file_name.lower().split(".")[-1]
 
         try:
@@ -152,40 +157,35 @@ def build_index(files_payload):
                 continue
 
             sentences = split_into_sentences(text)
+            if not sentences:
+                continue
+
             norm_sentences = [normalize_for_search(s) for s in sentences]
 
-            if sentences:
-                indexed_docs.append(
-                    {
-                        "file_name": file_name,
-                        "sentences": sentences,
-                        "norm_sentences": norm_sentences,
-                    }
-                )
+            indexed_docs.append(
+                {
+                    "file_name": file_name,
+                    "sentences": sentences,
+                    "norm_sentences": norm_sentences,
+                }
+            )
+
         except Exception as e:
-            # Ghi log ra UI nếu cần debug
             st.warning(f"Không đọc được file: {file_name}. Lỗi: {e}")
 
     return indexed_docs
 
 
-def search_keyword(indexed_docs, query_raw: str, before=3, after=3, max_results_per_file=200):
+def search_keyword(indexed_docs, query_raw: str,
+                   before=3, after=3, max_results_per_file=200):
     """
-    Tìm kiếm theo từ khóa, trả về danh sách kết quả:
-    [
-      {
-        "file_name": ...,
-        "context": "đoạn trích 3-4 câu trước/sau có highlight"
-      },
-      ...
-    ]
-    Hỗ trợ nhập nhiều từ khóa, ngăn cách bằng dấu ; hoặc ,
-    Điều kiện: câu chứa BẤT KỲ từ khóa nào (OR).
+    Tìm theo từ khóa, OR giữa các từ khóa.
+    query_raw: chuỗi, có thể nhiều từ khóa, phân tách ; hoặc ,
     """
     if not query_raw:
         return []
 
-    # Tách nhiều từ khóa nếu có
+    # Tách danh sách từ khóa
     raw_parts = [p.strip() for p in re.split(r"[;,]", query_raw) if p.strip()]
     if not raw_parts:
         return []
@@ -199,46 +199,51 @@ def search_keyword(indexed_docs, query_raw: str, before=3, after=3, max_results_
         sentences = doc["sentences"]
         norm_sentences = doc["norm_sentences"]
 
-        hits = []
-
+        hit_indices = []
         for i, s_norm in enumerate(norm_sentences):
-            if any(kw in s_norm for kw in norm_keywords):
-                hits.append(i)
+            if any(kw and kw in s_norm for kw in norm_keywords):
+                hit_indices.append(i)
 
-        if not hits:
+        if not hit_indices:
             continue
 
-        # Gom và tạo context
-        used_ranges = []
-        file_results = []
+        # Gom vùng ngữ cảnh, tránh trùng lặp
+        merged_ranges = []
+        for idx in hit_indices:
+            start = max(0, idx - before)
+            end = min(len(sentences), idx + after + 1)
 
-        for hit_idx in hits:
-            start = max(0, hit_idx - before)
-            end = min(len(sentences), hit_idx + after + 1)
-
-            # Tránh trùng lặp vùng với kết quả trước
-            if used_ranges and start <= used_ranges[-1][1]:
-                # merge
-                used_ranges[-1] = (used_ranges[-1][0], max(used_ranges[-1][1], end))
+            if merged_ranges and start <= merged_ranges[-1][1]:
+                # Gộp với vùng trước
+                merged_ranges[-1] = (
+                    merged_ranges[-1][0],
+                    max(merged_ranges[-1][1], end),
+                )
             else:
-                used_ranges.append((start, end))
+                merged_ranges.append((start, end))
 
-        for (start, end) in used_ranges:
+        file_count = 0
+        for start, end in merged_ranges:
             snippet_sentences = sentences[start:end]
-            snippet_text = " ".join(snippet_sentences).strip()
-            snippet_text = re.sub(r"\s{2,}", " ", snippet_text)
-            snippet_html = highlight_keyword(snippet_text, raw_parts)
-            file_results.append(snippet_html)
-            if len(file_results) >= max_results_per_file:
-                break
+            if not snippet_sentences:
+                continue
 
-        for snippet_html in file_results:
+            snippet_text = " ".join(snippet_sentences)
+            snippet_text = re.sub(r"\s{2,}", " ", snippet_text).strip()
+
+            # Highlight từ khóa
+            snippet_html = highlight_keyword(snippet_text, raw_parts)
+
             results.append(
                 {
                     "file_name": file_name,
                     "context_html": snippet_html
                 }
             )
+
+            file_count += 1
+            if file_count >= max_results_per_file:
+                break
 
     return results
 
@@ -249,6 +254,7 @@ def search_keyword(indexed_docs, query_raw: str, before=3, after=3, max_results_
 
 col1, col2 = st.columns([1, 2])
 
+# --- CỘT TRÁI: UPLOAD ---
 with col1:
     st.subheader("📂 Tải văn bản")
     uploaded_files = st.file_uploader(
@@ -258,20 +264,20 @@ with col1:
     )
 
     if uploaded_files:
-        st.success(f"Đã tải {len(uploaded_files)} file.")
+        st.success(f"Đã tải {len(uploaded_files)} file:")
         for f in uploaded_files:
-            st.markdown(f"- {f.name} ({f.size/1024:.1f} KB)")
+            st.markdown(f"- `{f.name}` ({f.size/1024:.1f} KB)")
     else:
         st.info("Vui lòng tải lên ít nhất một file để bắt đầu tra cứu.")
 
+# --- CỘT PHẢI: TÌM KIẾM ---
 with col2:
     st.subheader("🔍 Tra cứu từ khóa")
 
-    # Form để hỗ trợ Enter = Submit
     with st.form("search_form", clear_on_submit=False):
         default_query = st.session_state.get("last_query", "")
         query = st.text_input(
-            "Nhập từ khóa (có thể nhập nhiều, cách nhau bởi dấu ';' hoặc ',')",
+            "Nhập từ khóa (có thể nhiều, cách nhau bởi ';' hoặc ',')",
             value=default_query,
             placeholder="Ví dụ: hạn mức tín dụng; tài sản bảo đảm; điều kiện vay"
         )
@@ -285,24 +291,26 @@ with col2:
         elif not query.strip():
             st.warning("Vui lòng nhập từ khóa cần tra cứu.")
         else:
-            # Chuẩn bị dữ liệu cho cache: (tên, bytes)
-            files_payload = []
+            # Chuẩn bị dữ liệu cho cache: dùng hash để nhận diện phiên bản file
+            files_meta = []
             for uf in uploaded_files:
                 content = uf.getvalue()
-                # để cache hiệu quả hơn: thêm hash
                 file_hash = hashlib.md5(content).hexdigest()
-                files_payload.append((f"{uf.name}::{file_hash}", content))
+                # KHÔNG chỉnh sửa tên file khi đọc đuôi, chỉ dùng hash cho cache
+                files_meta.append((uf.name, file_hash, content))
 
             with st.spinner("Đang xử lý & tra cứu..."):
-                indexed_docs = build_index(files_payload)
+                indexed_docs = build_index(tuple(files_meta))
                 results = search_keyword(
                     indexed_docs,
                     query_raw=query,
                     before=CONTEXT_BEFORE,
-                    after=CONTEXT_AFTER
+                    after=CONTEXT_AFTER,
+                    max_results_per_file=MAX_RESULTS_PER_FILE
                 )
 
             st.markdown("---")
+
             if not results:
                 st.warning("Không tìm thấy kết quả nào chứa từ khóa trong các file đã tải.")
             else:
@@ -310,11 +318,11 @@ with col2:
                 for i, item in enumerate(results, start=1):
                     st.markdown(
                         f"""
-                        <div style="padding:10px; margin-bottom:8px; border-radius:6px; border:1px solid #ddd;">
-                            <div style="font-size:13px; color:#555;">
-                                <b>File:</b> {item['file_name'].split("::")[0]} &nbsp;|&nbsp; <b>Kết quả #{i}</b>
+                        <div style="padding:10px; margin-bottom:10px; border-radius:6px; border:1px solid #ddd;">
+                            <div style="font-size:12px; color:#666;">
+                                <b>File:</b> {item['file_name']} | <b>Kết quả #{i}</b>
                             </div>
-                            <div style="margin-top:4px; font-size:14px; line-height:1.6;">
+                            <div style="margin-top:6px; font-size:14px; line-height:1.6; text-align:justify;">
                                 {item['context_html']}
                             </div>
                         </div>
